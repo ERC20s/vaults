@@ -1,0 +1,7 @@
+# Governance marker: code lands in this repository's default branch only
+# by the named group's passed vote. The merge executor refuses to act for
+# any other group. Keep this file in the default branch; delete it to
+# withdraw consent. Generated in Manage group — do not edit by hand.
+version: 1
+group: d8a:batch-vaults
+token: ODWOrVYkM6sk6iA1kiqjNprzxGIdGP2TENchE3S2SLZSnouEY91rHDaYKzouZhVlZ53vSKCFxClHyqQLx-9JgwV7c6bzGxhW9t6ub_9GsrhSI7sahSdeN1f9v7bUyfzltY5xkTdVBQlN-NCpxXNiO8YYOWCzaV6zgDymvH11qpTzStoluCOOl1FOyQOmXnZ0hirzGJpqmJzCd3LqwyfQR1-qOEJNwmVzZZmx7VIJryURi32J1k0VAdkh_XhgZZn6srJwc5RvzhbOZvFPibCcT_xzVqruuSwykzLQLpvKnfU34iJLyp5gfR4U4wABy4epes0TMcc4gZTvYM-vCpvkow
