@@ -8,6 +8,9 @@ Scope and purpose
 Deployment scope
 - Code in this repository is intended for Sepolia testnet deployments only at this stage.
 - No mainnet deployments or secrets are to be added to the repository in this cycle.
+- A Sepolia-only deploy script (scripts/DeploySepolia.s.sol) is included to help contributors
+  perform safe, repeatable Sepolia dry-runs and deployments. The script checks chain id and
+  refuses to broadcast on non-Sepolia networks. Do not commit private keys or other secrets.
 
 Trust and threat model
 - Strategies are considered trusted for cycle 1: they may have permissioned functions and
