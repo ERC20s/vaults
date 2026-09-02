@@ -32,6 +32,21 @@ One rule, in both directions:
 `SECURITY.md` records the same rule in the trust model; if the three ever disagree,
 `src/interfaces/IStrategy.sol` is the source of truth.
 
+## Minimal Vault
+
+A minimal, dependency-free Vault implementation has been added at `src/Vault.sol`. It is intentionally
+small and exists to demonstrate the recommended interaction pattern with `IStrategy` without pulling
+in ERC-4626 share/accounting mechanics. The Vault:
+
+- pulls tokens from depositors into the Vault, approves exactly the deposit amount to the strategy,
+  and asserts the allowance is consumed and the strategy's `totalAssets()` increases by the deposit.
+- calls `strategy.withdraw(amount)`, uses the returned value as the canonical received amount, and
+  forwards that amount to the caller.
+- exposes `totalAssets()` and `maxWithdraw()` as simple forwards to the strategy.
+
+See `test/Vault.t.sol` for a small test-suite that asserts the Vault approves exactly, leaves no
+allowance behind, forwards `maxWithdraw()`, and uses `withdraw()`'s return value for accounting.
+
 ## Running the tests
 
 The repository is a standard Foundry project (`foundry.toml`, `src = "src"`, `test = "test"`,
@@ -43,43 +58,4 @@ forge build
 forge test -vvv
 ```
 
-The same command is the `test` entry of the root `.d8a` `run:` block, so it is what the ▶ button
-in the VS Code extension and the group's server launch.
-
-### What the tests enforce
-
-`test/IStrategyConformance.t.sol` turns the custody rule above into executable checks against a
-reference implementation:
-
-- `deposit()` reverts when the caller has not approved the strategy (the pull really is a pull).
-- `deposit(amount)` consumes exactly `amount` of allowance and leaves none behind.
-- `maxWithdraw() <= totalAssets()` when empty, funded, partly locked and over-locked.
-- `withdraw()` returns exactly the balance delta of `msg.sender`.
-- `withdraw(x)` never returns more than `maxWithdraw()` read before the call.
-- `panic()` keeps custody and reopens `maxWithdraw()`; the assets leave only via `withdraw()`.
-- a fuzz case over `(deposit, illiquid, requested)` re-checks all of the above at once.
-
-Each of those cases is a single shot. `test/IStrategyInvariants.t.sol` is the stateful half: Foundry
-drives random SEQUENCES of deposits, withdrawals, harvests, lockups, panics and injected yield
-through `test/handlers/StrategyHandler.sol`, and after every sequence it asserts
-
-- `maxWithdraw() <= totalAssets()`, and `totalAssets()` is still the strategy's own token balance;
-- neither view reverts, at any point in any sequence;
-- everything the handler got back is at most what it put in plus the yield paid in
-  (`pushed <= pulled + yieldInjected`);
-- conservation: every minted token is either in the handler's hands or in the strategy's custody;
-- `harvest()` never realises a gain that was not actually paid in;
-- every per-call post-condition the handler checked held on every call - the handler records
-  failures in a counter instead of reverting, so nothing is swallowed by the fuzzer.
-
-The handler is the only contract the fuzzer may call (`targetContracts()` / `excludeContracts()` on
-the test); the two ledger invariants stand down if a token ever appears from outside it, so a change
-in Foundry's targeting turns them off rather than producing a false failure. Run counts and depth
-live in the `[profile.default.invariant]` section of `foundry.toml` (`[profile.ci.invariant]` is the
-longer CI setting).
-
-Fixtures live under `test/mocks/`: `MockERC20.sol` (a minimal mint/approve/transferFrom token) and
-`MockStrategy.sol` (a reference `IStrategy` with a settable illiquid portion, and a `principal`
-baseline so `harvest()` reports realised gain while keeping custody). Both are test fixtures only -
-unrestricted minting, no access control, no real yield source - and must never be deployed or
-treated as an audited strategy.
+The `test` command is the root `.d8a` `run` entry as well.
