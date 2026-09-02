@@ -31,3 +31,35 @@ One rule, in both directions:
 
 `SECURITY.md` records the same rule in the trust model; if the three ever disagree,
 `src/interfaces/IStrategy.sol` is the source of truth.
+
+## Running the tests
+
+The repository is a standard Foundry project (`foundry.toml`, `src = "src"`, `test = "test"`,
+solc 0.8.19). The test suite imports nothing outside this repository - no `forge-std`, no
+cheatcodes, no submodule - so a clone runs straight away:
+
+```
+forge build
+forge test -vvv
+```
+
+The same command is the `test` entry of the root `.d8a` `run:` block, so it is what the ▶ button
+in the VS Code extension and the group's server launch.
+
+### What the tests enforce
+
+`test/IStrategyConformance.t.sol` turns the custody rule above into executable checks against a
+reference implementation:
+
+- `deposit()` reverts when the caller has not approved the strategy (the pull really is a pull).
+- `deposit(amount)` consumes exactly `amount` of allowance and leaves none behind.
+- `maxWithdraw() <= totalAssets()` when empty, funded, partly locked and over-locked.
+- `withdraw()` returns exactly the balance delta of `msg.sender`.
+- `withdraw(x)` never returns more than `maxWithdraw()` read before the call.
+- `panic()` keeps custody and reopens `maxWithdraw()`; the assets leave only via `withdraw()`.
+- a fuzz case over `(deposit, illiquid, requested)` re-checks all of the above at once.
+
+Fixtures live under `test/mocks/`: `MockERC20.sol` (a minimal mint/approve/transferFrom token) and
+`MockStrategy.sol` (a reference `IStrategy` with a settable illiquid portion). Both are test
+fixtures only - unrestricted minting, no access control, no yield source - and must never be
+deployed or treated as an audited strategy.
