@@ -1,0 +1,5 @@
+Foundry test root (foundry.toml: test = "test").
+
+Unit, fuzz and invariant suites for the vault and strategies go here. Fuzz and
+invariant budgets are set in foundry.toml under [profile.default.fuzz] and
+[profile.default.invariant]; the `ci` profile raises them.
