@@ -16,6 +16,6 @@ proof: ODWOrVYkM6sk6iA1kiqjNprzxGIdGP2TENchE3S2SLZSnouEY91rHDaYKzouZhVlZ53vSKCFx
 # (the VSD8A extension) and by nothing else.
 run:
   {
-    "// nothing runnable yet": "src/interfaces only, and no foundry.toml - once the vault and the toolchain land, delete the # below",
-    "// test": "forge test -vvv"
+    "// setup": "forge install foundry-rs/forge-std - run once per clone, not a long-lived terminal",
+    "test": "forge test -vvv"
   }

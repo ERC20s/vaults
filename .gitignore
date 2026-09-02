@@ -1,0 +1,23 @@
+# Foundry build output and caches
+out/
+cache/
+cache_forge/
+broadcast/
+# forge-std and other dependencies are fetched with `forge install`, not committed
+lib/
+
+# Docs artifacts (`forge doc`)
+docs/book/
+docs/.vitepress/cache/
+
+# Local environment — never commit secrets. Setting NAMES live in .d8a `keys:`.
+.env
+.env.*
+!.env.example
+
+# Editor / OS noise
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/*
+!.vscode/extensions.json
