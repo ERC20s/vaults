@@ -7,10 +7,25 @@ solc = "0.8.19"
 optimizer = true
 optimizer_runs = 200
 
-# The conformance suite is written against plain require/try-catch and imports nothing
-# outside this repository, so `forge test` runs with no submodule or install step.
+# The conformance and invariant suites are written against plain require/try-catch and import
+# nothing outside this repository, so `forge test` runs with no submodule or install step.
 [profile.default.fuzz]
 runs = 256
 
+# Stateful suite (test/IStrategyInvariants.t.sol): `runs` random sequences of `depth` calls each,
+# all of them routed through test/handlers/StrategyHandler.sol by the test's targetContracts().
+# fail_on_revert = false because a bounded handler action is allowed to be a no-op; the handler
+# does NOT rely on reverts to report a broken rule - it records failures in a counter that
+# invariant_HandlerPostconditionsHold asserts on, so nothing is hidden by this setting.
+[profile.default.invariant]
+runs = 64
+depth = 64
+fail_on_revert = false
+
 [profile.ci.fuzz]
 runs = 1000
+
+[profile.ci.invariant]
+runs = 256
+depth = 128
+fail_on_revert = false

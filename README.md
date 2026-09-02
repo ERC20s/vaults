@@ -59,7 +59,27 @@ reference implementation:
 - `panic()` keeps custody and reopens `maxWithdraw()`; the assets leave only via `withdraw()`.
 - a fuzz case over `(deposit, illiquid, requested)` re-checks all of the above at once.
 
+Each of those cases is a single shot. `test/IStrategyInvariants.t.sol` is the stateful half: Foundry
+drives random SEQUENCES of deposits, withdrawals, harvests, lockups, panics and injected yield
+through `test/handlers/StrategyHandler.sol`, and after every sequence it asserts
+
+- `maxWithdraw() <= totalAssets()`, and `totalAssets()` is still the strategy's own token balance;
+- neither view reverts, at any point in any sequence;
+- everything the handler got back is at most what it put in plus the yield paid in
+  (`pushed <= pulled + yieldInjected`);
+- conservation: every minted token is either in the handler's hands or in the strategy's custody;
+- `harvest()` never realises a gain that was not actually paid in;
+- every per-call post-condition the handler checked held on every call - the handler records
+  failures in a counter instead of reverting, so nothing is swallowed by the fuzzer.
+
+The handler is the only contract the fuzzer may call (`targetContracts()` / `excludeContracts()` on
+the test); the two ledger invariants stand down if a token ever appears from outside it, so a change
+in Foundry's targeting turns them off rather than producing a false failure. Run counts and depth
+live in the `[profile.default.invariant]` section of `foundry.toml` (`[profile.ci.invariant]` is the
+longer CI setting).
+
 Fixtures live under `test/mocks/`: `MockERC20.sol` (a minimal mint/approve/transferFrom token) and
-`MockStrategy.sol` (a reference `IStrategy` with a settable illiquid portion). Both are test
-fixtures only - unrestricted minting, no access control, no yield source - and must never be
-deployed or treated as an audited strategy.
+`MockStrategy.sol` (a reference `IStrategy` with a settable illiquid portion, and a `principal`
+baseline so `harvest()` reports realised gain while keeping custody). Both are test fixtures only -
+unrestricted minting, no access control, no real yield source - and must never be deployed or
+treated as an audited strategy.

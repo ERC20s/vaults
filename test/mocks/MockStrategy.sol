@@ -15,11 +15,20 @@ import {MockERC20} from "./MockERC20.sol";
 ///   the amount transferred, capped at `maxWithdraw()` read at the start of the call;
 /// - `maxWithdraw() <= totalAssets()`, the gap being `illiquid`;
 /// - harvested and panic-unwound assets stay in the strategy and leave only through withdraw().
+///
+/// It has no yield source of its own: "yield" is modelled by transferring the underlying token
+/// straight to this contract (the invariant handler mints it there). `principal` is what was pulled
+/// in through deposit() and not yet withdrawn, so anything held above it is a realised gain that
+/// harvest() reports - without moving a token, which is the rule harvest() exists to prove.
 contract MockStrategy is IStrategy {
     MockERC20 public immutable token;
 
     /// @notice Portion of the position that is NOT redeemable this block (locked, in an epoch, ...).
     uint256 public illiquid;
+
+    /// @notice Assets pulled in through deposit() (plus already-harvested gains) and not yet paid out.
+    /// @dev The baseline harvest() measures against; it never moves tokens by itself.
+    uint256 public principal;
 
     constructor(MockERC20 token_) {
         token = token_;
@@ -46,6 +55,7 @@ contract MockStrategy is IStrategy {
     /// @dev PULL: the caller must have approved this contract for at least `amount`.
     function deposit(uint256 amount) external override {
         require(token.transferFrom(msg.sender, address(this), amount), "MockStrategy: pull failed");
+        principal += amount;
     }
 
     /// @inheritdoc IStrategy
@@ -53,15 +63,21 @@ contract MockStrategy is IStrategy {
     function withdraw(uint256 amount) external override returns (uint256 withdrawn) {
         uint256 cap = maxWithdraw();
         withdrawn = amount > cap ? cap : amount;
+        principal = withdrawn >= principal ? 0 : principal - withdrawn;
         if (withdrawn > 0) {
             require(token.transfer(msg.sender, withdrawn), "MockStrategy: push failed");
         }
     }
 
     /// @inheritdoc IStrategy
-    /// @dev No yield source: a no-op that keeps custody of everything it holds.
-    function harvest() external pure override returns (uint256 harvested) {
-        harvested = 0;
+    /// @dev Realises the gain held above `principal` and KEEPS IT: no token moves, the amount stays
+    /// visible through totalAssets(), and the caller is paid only through withdraw(). Returns 0 when
+    /// there is nothing above the baseline, so it stays a safe no-op for a strategy that earns
+    /// nothing.
+    function harvest() external override returns (uint256 harvested) {
+        uint256 total = totalAssets();
+        harvested = total > principal ? total - principal : 0;
+        principal = total > principal ? total : principal;
     }
 
     /// @inheritdoc IStrategy
