@@ -16,8 +16,23 @@ Trust and threat model
 
 Assumptions about interfaces
 - The IStrategy interface defines the minimal boundary between Vault and strategy:
-  totalAssets(), deposit(...), withdraw(...), harvest(), and panic(). Implementations
-  must document units (underlying token vs vault shares) and whether amounts are gross or net.
+  asset(), totalAssets(), deposit(...), withdraw(...), harvest(), and panic().
+- asset() returns the ERC-20 token the strategy accepts, holds and accounts in. It must not
+  revert and must be immutable for the life of the strategy.
+- Wiring rule: a Vault must reject any strategy whose asset differs from its own, at the
+  moment the strategy is bound - require(strategy.asset() == asset()). Without this check a
+  mis-wired strategy is not a revert but a silent share-price corruption: deposits land in a
+  strategy denominated in a different token and totalAssets() returns numbers in the wrong units.
+- Units are fixed by the interface, not by convention: every uint256 amount in IStrategy
+  (arguments, return values and event fields) is in underlying-token units as reported by
+  asset(), never in vault shares.
+- Amounts returned are net, i.e. the amount actually moved. deposit(uint256) returns the amount
+  actually deposited and withdraw(uint256) returns the amount actually withdrawn; both may be
+  less than requested (caps, rounding, fee-on-transfer assets). Vault accounting must use the
+  returned value and never the requested value.
+- IStrategy declares the events Deposited, Withdrawn, Harvested and Panicked so that strategy
+  behaviour is observable off-chain and assertable in tests; implementations are expected to
+  emit them.
 
 Operational assumptions
 - No private keys, API keys, or other secrets should be committed to the repository.
