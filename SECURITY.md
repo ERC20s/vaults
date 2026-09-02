@@ -16,8 +16,17 @@ Trust and threat model
 
 Assumptions about interfaces
 - The IStrategy interface defines the minimal boundary between Vault and strategy:
-  totalAssets(), deposit(...), withdraw(...), harvest(), and panic(). Implementations
+  totalAssets(), maxWithdraw(), deposit(...), withdraw(...), harvest(), and panic(). Implementations
   must document units (underlying token vs vault shares) and whether amounts are gross or net.
+- All IStrategy amounts are denominated in the underlying token, never in vault shares.
+- totalAssets() and maxWithdraw() are views that must not revert. maxWithdraw() is the amount the
+  strategy can pay out in the current block and must satisfy maxWithdraw() <= totalAssets(); the
+  difference is the illiquid part of the position. A Vault uses maxWithdraw() to answer ERC-4626
+  maxWithdraw/previewWithdraw honestly instead of calling withdraw() and discovering a shortfall
+  after state has already moved.
+- maxWithdraw() is an upper bound, not a settlement guarantee. Callers must still use the value
+  returned by withdraw() for accounting; a strategy that reports more than it can pay is a bug and
+  must be treated as such in tests.
 
 Operational assumptions
 - No private keys, API keys, or other secrets should be committed to the repository.
@@ -26,8 +35,19 @@ Operational assumptions
 Reentrancy and approvals
 - Vault and strategy implementations must consider reentrancy risks. Early cycles will use
   simple guards (e.g., checks-effects-interactions or nonReentrant modifiers) where needed.
-- Strategies may require token approvals; callers (Vault) are expected to set approvals
-  before calling deposit/withdraw functions.
+- Custody is pull-based on the way in and push-based on the way out, and this is the single rule
+  for the whole boundary:
+  - deposit(amount): the caller (the Vault) approves the strategy for at least `amount` of the
+    underlying token, and the strategy pulls it with transferFrom(msg.sender, ...) inside the call.
+    A strategy must never expect tokens to be pushed to it ahead of the call, and must never credit
+    a balance it has not pulled itself.
+  - withdraw(amount): the strategy transfers the underlying token to msg.sender before returning,
+    and returns the amount actually transferred. No approval by the strategy is required or assumed.
+  - Harvested and panic-unwound assets stay in the strategy's custody and are released only through
+    withdraw().
+- Because the strategy pulls, the Vault should approve exactly what it is depositing rather than
+  leaving a standing unlimited allowance, and should treat any leftover allowance after deposit()
+  as a finding.
 
 Fees and accounting
 - Fee expectations (e.g., basis points) are not locked in this cycle; any fees introduced
