@@ -3,6 +3,7 @@ pragma solidity ^0.8.19;
 
 import {IStrategy} from "../../src/interfaces/IStrategy.sol";
 import {MockERC20} from "./MockERC20.sol";
+import {SafeERC20} from "../../src/utils/SafeERC20.sol";
 
 /// @title ReferenceVault (test-only)
 /// @notice Minimal, deliberately underspecified vault used only by the test-suite as a
@@ -18,6 +19,8 @@ import {MockERC20} from "./MockERC20.sol";
 /// - withdraw: calls strategy.withdraw(amount), receives the pushed tokens, then forwards
 ///   the exact amount the strategy returned to the original caller and returns it.
 contract ReferenceVault {
+    using SafeERC20 for MockERC20;
+
     MockERC20 public immutable token;
     IStrategy public immutable strategy;
 
@@ -31,10 +34,10 @@ contract ReferenceVault {
     /// contract's allowance for the strategy MUST be 0 (the strategy pulled the funds).
     function deposit(uint256 amount) external {
         // Pull from caller into the vault first.
-        require(token.transferFrom(msg.sender, address(this), amount), "ReferenceVault: pull failed");
+        token.safeTransferFrom(msg.sender, address(this), amount);
 
         // Approve the strategy for exactly the amount we intend to send it.
-        require(token.approve(address(strategy), amount), "ReferenceVault: approve failed");
+        token.safeApprove(address(strategy), amount);
 
         // Let the strategy pull from this vault. It must consume the allowance.
         strategy.deposit(amount);
@@ -51,7 +54,7 @@ contract ReferenceVault {
         uint256 delta = token.balanceOf(address(this)) - before;
         require(withdrawn == delta, "ReferenceVault: strategy returned mismatch");
         if (withdrawn > 0) {
-            require(token.transfer(msg.sender, withdrawn), "ReferenceVault: forward failed");
+            token.safeTransfer(msg.sender, withdrawn);
         }
         return withdrawn;
     }
