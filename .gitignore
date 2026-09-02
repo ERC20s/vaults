@@ -1,0 +1,10 @@
+# Foundry build output
+out/
+cache/
+broadcast/
+
+# Dependencies installed with `forge install`
+lib/
+
+# Local environment
+.env
