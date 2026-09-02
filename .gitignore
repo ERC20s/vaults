@@ -1,0 +1,17 @@
+# Foundry build output
+out/
+cache/
+broadcast/
+
+# Dependencies (none are required to run the tests in this repository)
+lib/
+node_modules/
+
+# Local environment
+.env
+.env.local
+
+# Editor / OS noise
+.DS_Store
+.vscode/
+.idea/

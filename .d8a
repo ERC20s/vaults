@@ -129,6 +129,5 @@ payments:
 # (the VSD8A extension) and by nothing else.
 run:
   {
-    "// nothing runnable yet": "src/interfaces only, and no foundry.toml - once the vault and the toolchain land, delete the # below",
-    "// test": "forge test -vvv"
+    "test": "forge test -vvv"
   }
