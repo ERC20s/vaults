@@ -7,7 +7,8 @@ import {SafeERC20, IERC20} from "../utils/SafeERC20.sol";
 /// @title MinimalVault
 /// @notice A small, auditable example vault that demonstrates an ERC-4626-like surface
 /// and the exact custody boundary with an IStrategy. It is intentionally minimal: no
-/// ownership, fees, pausing or reentrancy guards. Uses SafeERC20 for token ops.
+/// ownership, fees or pausing. The four state-changing entry points are single-entry
+/// (`nonReentrant`); the views are not. Uses SafeERC20 for token ops.
 contract MinimalVault {
     using SafeERC20 for IERC20;
 
@@ -16,6 +17,41 @@ contract MinimalVault {
 
     mapping(address => uint256) public balanceOf;
     uint256 public totalSupply;
+
+    uint256 private constant _NOT_ENTERED = 1;
+    uint256 private constant _ENTERED = 2;
+
+    /// @dev Single-entry flag for the state-changing entry points. Starts (and returns) at
+    /// `_NOT_ENTERED`, so the slot is warm and every call after the first pays only a warm
+    /// SSTORE for the guard.
+    uint256 private _locked = _NOT_ENTERED;
+
+    /// @dev Rejects a nested call into `deposit`, `mint`, `withdraw` or `redeem`.
+    ///
+    /// Every other guard in this contract protects a SINGLE call: zero-share, no-price,
+    /// strategy-pulled, floor-priced redeem. None of them survives a nested one, and this
+    /// vault opens the window itself: `withdraw()` and `redeem()` call `strategy.withdraw()`
+    /// BEFORE they burn shares, so between the strategy's push and its return the assets have
+    /// already left the strategy - `strategy.totalAssets()` is low - while `totalSupply` still
+    /// counts the shares being redeemed. `_convertToShares` prices against exactly that pair.
+    ///
+    /// Concretely, with totalSupply 100 and totalAssets 100: a holder redeems 50, the strategy
+    /// pushes 50 to the vault and, before returning, a callback (a hookful underlying, an
+    /// ERC-777/ERC-1363 asset, or a strategy that routes through another contract) re-enters
+    /// with `deposit(50)`. That nested deposit reads totalAssets 50 against totalSupply 100 and
+    /// mints 100 shares for 50 assets instead of 50. Every existing guard passes:
+    /// `_assertStrategyPulled` compares against a snapshot that already includes the in-transit
+    /// 50, and the outer `got == withdrawn` check still holds. End state: 150 shares against
+    /// 100 assets, and the caller has taken half the vault from the other holders.
+    ///
+    /// The trade-off is deliberate: a strategy that legitimately re-enters the vault during
+    /// `deposit()` or `withdraw()` is now refused. See `test/mocks/MockReentrantStrategy.sol`.
+    modifier nonReentrant() {
+        require(_locked == _NOT_ENTERED, "MinimalVault: reentrancy");
+        _locked = _ENTERED;
+        _;
+        _locked = _NOT_ENTERED;
+    }
 
     constructor(IERC20 token_, IStrategy strategy_) {
         token = token_;
@@ -39,7 +75,11 @@ contract MinimalVault {
     /// - the strategy must have pulled exactly `amount` out of this vault by the time
     ///   `deposit()` returns, which is the pull-based custody rule in
     ///   `src/interfaces/IStrategy.sol` stated as an assertion instead of a comment.
-    function deposit(uint256 amount) external returns (uint256 shares) {
+    ///
+    /// The call is also single-entry (`nonReentrant`): none of the three guards above survives
+    /// a nested call, and a callback during `strategy.deposit()` would price against a state
+    /// this call has already half-moved.
+    function deposit(uint256 amount) external nonReentrant returns (uint256 shares) {
         require(amount > 0, "MinimalVault: zero-assets");
 
         uint256 totalAssetsBefore = strategy.totalAssets();
@@ -69,7 +109,7 @@ contract MinimalVault {
     /// Mirrors the guards in `deposit()`: the vault must be able to price the mint, no
     /// zero-share or zero-asset mint, and the strategy must take custody of everything
     /// this call pulled in.
-    function mint(uint256 shares) external returns (uint256 assets) {
+    function mint(uint256 shares) external nonReentrant returns (uint256 assets) {
         require(shares > 0, "MinimalVault: zero-shares");
 
         uint256 totalAssetsBefore = strategy.totalAssets();
@@ -92,7 +132,11 @@ contract MinimalVault {
     /// @notice Withdraw up to `assets` by burning proportional shares from caller.
     /// @dev Calls strategy.withdraw(assets) and burns shares proportional to the
     /// actual amount returned (ceil), then forwards tokens to caller.
-    function withdraw(uint256 assets) external returns (uint256 withdrawn) {
+    ///
+    /// Single-entry (`nonReentrant`): shares are burned AFTER `strategy.withdraw()` returns, so
+    /// a callback fired while the assets are in transit would see a low `totalAssets()` against
+    /// an unchanged `totalSupply` and mint against it.
+    function withdraw(uint256 assets) external nonReentrant returns (uint256 withdrawn) {
         uint256 totalAssetsBefore = strategy.totalAssets();
         require(totalAssetsBefore > 0 && totalSupply > 0, "no-liquidity");
 
@@ -130,7 +174,11 @@ contract MinimalVault {
     /// an inflated share price (deposit 3, donate 7 to the strategy, redeem 1) was paid
     /// 4 assets for a share worth 3.33 and the remaining holders paid the difference.
     /// With floor pricing the cap can no longer bind, so it is kept as an assertion.
-    function redeem(uint256 shares) external returns (uint256 withdrawn) {
+    ///
+    /// Single-entry (`nonReentrant`) for the same reason as `withdraw()`: the burn happens after
+    /// the strategy has pushed, and a nested `deposit()` in that window mints at a price the
+    /// in-transit assets have temporarily depressed.
+    function redeem(uint256 shares) external nonReentrant returns (uint256 withdrawn) {
         require(shares > 0, "MinimalVault: zero-shares");
         require(balanceOf[msg.sender] >= shares, "insufficient shares");
 

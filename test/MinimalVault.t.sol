@@ -4,6 +4,7 @@ pragma solidity ^0.8.19;
 import {MockERC20} from "./mocks/MockERC20.sol";
 import {MockStrategy} from "./mocks/MockStrategy.sol";
 import {MockPartialPullStrategy} from "./mocks/MockPartialPullStrategy.sol";
+import {MockReentrantStrategy, ReentrantDepositor, IVaultLike} from "./mocks/MockReentrantStrategy.sol";
 import {MinimalVault} from "../src/vault/MinimalVault.sol";
 import {IStrategy} from "../src/interfaces/IStrategy.sol";
 import {IERC20} from "../src/utils/SafeERC20.sol";
@@ -453,5 +454,174 @@ contract MinimalVaultTest {
             require(vault.totalAssets() == assetsBefore, "assets moved on a reverted deposit");
             require(token.balanceOf(address(vault)) == 0, "tokens stranded in the vault");
         }
+    }
+
+    // --- Reentrancy guard (a callback mid-call must not mint free shares) ---
+
+    /// @dev Builds a vault over the re-entrant fixture, bootstraps it 1:1 with `bootstrap`
+    /// assets from this test contract and funds the attacker helper with its OWN `attackerFunds`
+    /// - minted straight to the helper, never to the strategy, so it stays out of
+    /// `strategy.totalAssets()` and the nested call is a fully funded, legitimate-looking deposit.
+    function _reentrantVault(uint256 bootstrap, uint256 attackerFunds)
+        internal
+        returns (MockReentrantStrategy rstrat, MinimalVault v, ReentrantDepositor atk)
+    {
+        rstrat = new MockReentrantStrategy(token);
+        v = new MinimalVault(IERC20(address(token)), IStrategy(address(rstrat)));
+        atk = new ReentrantDepositor(IVaultLike(address(v)), token);
+        rstrat.setHook(address(atk));
+
+        token.mint(address(this), bootstrap);
+        token.approve(address(v), bootstrap);
+        require(v.deposit(bootstrap) == bootstrap, "setup: bootstrap not 1:1");
+
+        if (attackerFunds > 0) {
+            token.mint(address(atk), attackerFunds);
+        }
+    }
+
+    /// @notice The window is real: while the strategy's push is in transit the vault quotes a
+    /// price that is wrong by exactly the redeemed amount.
+    /// @dev Read-only proof, so it does not need the guard to be absent. The helper only calls
+    /// views (which are deliberately NOT guarded) from inside `strategy.withdraw()`: with 100
+    /// assets over 100 shares, a redeem of 50 leaves the strategy holding 50 while `totalSupply`
+    /// is still 100, so `convertToShares(50)` quotes 100 shares for 50 assets - double what they
+    /// are worth. That quote is what a nested deposit would have been minted at.
+    function test_ReentrancyWindowMisPricesDepositsWhileAssetsAreInTransit() public {
+        (MockReentrantStrategy rstrat, MinimalVault v, ReentrantDepositor atk) = _reentrantVault(100e18, 0);
+
+        atk.arm(ReentrantDepositor.Mode.Observe, 50e18);
+        rstrat.armWithdraw(true);
+
+        uint256 withdrawn = v.redeem(50e18);
+        require(withdrawn == 50e18, "control redeem did not pay out in full");
+        require(atk.callbacks() == 1, "callback did not fire");
+
+        require(atk.observedAssets() == 50e18, "window: totalAssets not depressed");
+        require(atk.observedSupply() == 100e18, "window: supply already burned");
+        require(atk.observedShares() == 100e18, "window: expected a doubled quote");
+
+        // Outside the window the same quote is honest again.
+        require(v.convertToShares(50e18) == 50e18, "quote still wrong after the call settled");
+    }
+
+    /// @notice A nested deposit fired from inside `strategy.withdraw()` during `redeem()` is
+    /// rejected, and the whole outer redemption reverts with it.
+    /// @dev Without the guard this is the theft: totalSupply 100 / totalAssets 100, redeem 50,
+    /// the strategy pushes 50 and calls back, the nested deposit of 50 is priced at
+    /// 50 * 100 / 50 == 100 shares - 150 shares against 100 assets, and the attacker owns half
+    /// the vault for a quarter of its assets. Every earlier guard passes on that path:
+    /// `_assertStrategyPulled` measures against a snapshot that already includes the in-transit
+    /// 50, and the outer `got == withdrawn` check still holds.
+    function test_RedeemRevertsWhenStrategyCallbackReEntersDeposit() public {
+        (MockReentrantStrategy rstrat, MinimalVault v, ReentrantDepositor atk) = _reentrantVault(100e18, 50e18);
+
+        atk.arm(ReentrantDepositor.Mode.Deposit, 50e18);
+        rstrat.armWithdraw(true);
+
+        try v.redeem(50e18) returns (uint256) {
+            require(false, "re-entrant redeem was accepted");
+        } catch {
+            // expected: "MinimalVault: reentrancy", bubbled up through the strategy
+        }
+
+        // The outer call reverted whole: nothing moved anywhere.
+        require(v.totalSupply() == 100e18, "supply moved on a reverted redeem");
+        require(v.balanceOf(address(this)) == 100e18, "shares moved on a reverted redeem");
+        require(v.balanceOf(address(atk)) == 0, "attacker was minted shares");
+        require(token.balanceOf(address(rstrat)) == 100e18, "strategy custody changed");
+        require(token.balanceOf(address(v)) == 0, "tokens stranded in the vault");
+        require(token.balanceOf(address(atk)) == 50e18, "attacker funds moved");
+    }
+
+    /// @notice The same callback re-entering `mint()` instead of `deposit()` is rejected too.
+    function test_RedeemRevertsWhenStrategyCallbackReEntersMint() public {
+        (MockReentrantStrategy rstrat, MinimalVault v, ReentrantDepositor atk) = _reentrantVault(100e18, 80e18);
+
+        atk.arm(ReentrantDepositor.Mode.Mint, 40e18);
+        rstrat.armWithdraw(true);
+
+        try v.redeem(50e18) returns (uint256) {
+            require(false, "re-entrant mint during redeem was accepted");
+        } catch {}
+
+        require(v.totalSupply() == 100e18, "supply moved on a reverted redeem");
+        require(v.balanceOf(address(atk)) == 0, "attacker was minted shares");
+        require(token.balanceOf(address(v)) == 0, "tokens stranded in the vault");
+        require(token.balanceOf(address(atk)) == 80e18, "attacker funds moved");
+    }
+
+    /// @notice `withdraw()` is guarded on the same path as `redeem()`.
+    function test_WithdrawRevertsWhenStrategyCallbackReEntersDeposit() public {
+        (MockReentrantStrategy rstrat, MinimalVault v, ReentrantDepositor atk) = _reentrantVault(100e18, 50e18);
+
+        atk.arm(ReentrantDepositor.Mode.Deposit, 50e18);
+        rstrat.armWithdraw(true);
+
+        try v.withdraw(50e18) returns (uint256) {
+            require(false, "re-entrant withdraw was accepted");
+        } catch {}
+
+        require(v.totalSupply() == 100e18, "supply moved on a reverted withdraw");
+        require(v.balanceOf(address(this)) == 100e18, "shares moved on a reverted withdraw");
+        require(token.balanceOf(address(rstrat)) == 100e18, "strategy custody changed");
+        require(token.balanceOf(address(v)) == 0, "tokens stranded in the vault");
+    }
+
+    /// @notice A callback fired from inside `strategy.deposit()` is rejected as well, so the
+    /// entry path is closed and not only the exit path.
+    function test_DepositRevertsWhenStrategyCallbackReEntersDeposit() public {
+        (MockReentrantStrategy rstrat, MinimalVault v, ReentrantDepositor atk) = _reentrantVault(100e18, 50e18);
+
+        atk.arm(ReentrantDepositor.Mode.Deposit, 50e18);
+        rstrat.armDeposit(true);
+
+        uint256 second = 100e18;
+        token.mint(address(this), second);
+        token.approve(address(v), second);
+        uint256 walletBefore = token.balanceOf(address(this));
+
+        try v.deposit(second) returns (uint256) {
+            require(false, "re-entrant deposit was accepted");
+        } catch {}
+
+        require(token.balanceOf(address(this)) == walletBefore, "assets left on a reverted deposit");
+        require(v.totalSupply() == 100e18, "supply moved on a reverted deposit");
+        require(token.balanceOf(address(rstrat)) == 100e18, "strategy custody changed");
+        require(token.balanceOf(address(v)) == 0, "tokens stranded in the vault");
+        require(token.allowance(address(v), address(rstrat)) == 0, "allowance left dangling");
+        require(token.balanceOf(address(atk)) == 50e18, "attacker funds moved");
+    }
+
+    /// @notice The guard blocks nesting, not ordinary use: the same fixture disarmed deposits,
+    /// redeems and withdraws normally, and the flag is released after a reverted re-entrant call
+    /// rather than leaving the vault bricked.
+    function test_GuardReleasesAndDisarmedStrategyStillWorks() public {
+        (MockReentrantStrategy rstrat, MinimalVault v, ReentrantDepositor atk) = _reentrantVault(100e18, 50e18);
+
+        // 1. A re-entrant redeem is refused.
+        atk.arm(ReentrantDepositor.Mode.Deposit, 50e18);
+        rstrat.armWithdraw(true);
+        try v.redeem(50e18) returns (uint256) {
+            require(false, "re-entrant redeem was accepted");
+        } catch {}
+
+        // 2. The very next call, with the fixture disarmed, behaves exactly as before the change.
+        rstrat.armWithdraw(false);
+
+        uint256 more = 25e18;
+        token.mint(address(this), more);
+        token.approve(address(v), more);
+        require(v.deposit(more) == more, "deposit blocked after a reverted re-entrant call");
+
+        uint256 balBefore = token.balanceOf(address(this));
+        uint256 withdrawn = v.redeem(50e18);
+        require(withdrawn == 50e18, "redeem blocked after a reverted re-entrant call");
+        require(token.balanceOf(address(this)) - balBefore == withdrawn, "redeem return mismatch");
+        require(v.totalSupply() == 75e18, "supply and burn disagree");
+
+        uint256 pulled = v.withdraw(10e18);
+        require(pulled == 10e18, "withdraw blocked after a reverted re-entrant call");
+        require(token.balanceOf(address(v)) == 0, "tokens stranded in the vault");
     }
 }
