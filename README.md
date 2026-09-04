@@ -87,13 +87,25 @@ fixture that reverts on exactly that change and returns no boolean from `approve
 `transferFrom` - while leaving the single-call behaviour intact for a well-behaved token.
 
 `test/MinimalVault.t.sol` covers the deposit and mint paths of `src/vault/MinimalVault.sol`,
-including the two guards that keep the conservative (floor) share rounding safe. A deposit whose
+including the guards that keep the conservative (floor) share rounding safe. A deposit whose
 share amount rounds down to zero reverts instead of taking the assets and minting nothing - the
 donation case in the tests inflates `MockStrategy.totalAssets()` with a direct transfer and then
 proves the next deposit reverts rather than paying for zero shares. And after
 `strategy.deposit(amount)` the vault requires its own token balance to be back where it started, so
 underlying can never be stranded in the vault where `totalAssets()` cannot see it and `withdraw()`
 cannot reach it; any allowance the strategy left unused is reset to zero.
+
+One state has no exchange rate at all, and the vault now says so. An EMPTY vault
+(`totalSupply == 0`) bootstraps 1:1, but a WIPED-OUT vault - shares outstanding while
+`strategy.totalAssets()` reads 0, after a total loss, an emergency unwind that ended empty or a
+strategy drained from outside - cannot price a deposit. `deposit()` and `mint()` require
+`totalSupply == 0 || totalAssets > 0` ("MinimalVault: no-price"), `convertToShares` returns 0
+instead of quoting 1:1, and `convertToAssets` reports 0 for shares backed by nothing. Without this
+guard a deposit into a wiped-out vault was minted 1:1 alongside the dead shares and lost a share of
+itself to them on the way out. The consequence is deliberate: after a total loss the vault is
+un-depositable and the existing shares stay locked, since `withdraw()` and `redeem()` already revert
+with "no-liquidity". Locking beats silently paying new money to dead shares; a production vault
+would need an explicit recovery path, which is out of scope for this example.
 
 The same rounding discipline governs the exit. `redeem()` prices the assets it asks the strategy for
 with FLOOR (`shares * totalAssets / totalSupply`), so a redeemer is never paid more than the burned

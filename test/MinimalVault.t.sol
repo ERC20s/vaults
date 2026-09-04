@@ -312,4 +312,146 @@ contract MinimalVaultTest {
         require(token.allowance(address(vault), address(mock)) == 0, "allowance left dangling");
         require(vault.balanceOf(address(this)) == shares, "shares not credited");
     }
+
+    // --- No-price guard (shares outstanding, strategy wiped out) ---
+
+    /// @dev Drains the strategy completely and returns the amount taken out.
+    /// MockStrategy.withdraw() has no access control and pays `msg.sender`, so a total
+    /// loss / emergency-unwind-that-ended-empty state is reachable with the existing
+    /// fixture: no new mock is needed.
+    function _drainStrategy() internal returns (uint256 drained) {
+        mock.setIlliquid(0);
+        drained = mock.withdraw(mock.totalAssets());
+        require(mock.totalAssets() == 0, "setup: strategy not drained");
+    }
+
+    /// @notice With shares outstanding and totalAssets() at 0 the vault has no exchange
+    /// rate, and a deposit must revert rather than mint 1:1 against dead shares.
+    /// @dev Before the fix, _convertToShares treated "empty vault" and "wiped-out vault"
+    /// as the same case: Alice deposits 100 and holds 100 shares, the strategy goes to 0,
+    /// Bob deposits 100 and is minted 100 shares against totalAssets 100 / totalSupply
+    /// 200 - Bob's redeem then prices at floor(100 * 100 / 200) == 50 and half of his
+    /// deposit has revived Alice's worthless shares.
+    function test_DepositRevertsWhenStrategyReportsZeroAssets() public {
+        uint256 alice = 100e18;
+        token.mint(address(this), alice);
+        token.approve(address(vault), alice);
+        require(vault.deposit(alice) == alice, "bootstrap not 1:1");
+
+        _drainStrategy();
+        require(vault.totalAssets() == 0, "setup: vault still sees assets");
+        require(vault.totalSupply() == alice, "setup: supply moved");
+
+        // The views must not quote a price for a vault backed by nothing.
+        require(vault.convertToShares(50e18) == 0, "priced a deposit into a wiped-out vault");
+        require(vault.convertToAssets(alice) == 0, "dead shares still quoted as valuable");
+
+        uint256 bob = 100e18;
+        token.mint(address(this), bob);
+        token.approve(address(vault), bob);
+        uint256 balanceBefore = token.balanceOf(address(this));
+
+        try vault.deposit(bob) returns (uint256) {
+            require(false, "deposit into a wiped-out vault did not revert");
+        } catch {
+            // expected: "MinimalVault: no-price"
+        }
+
+        require(token.balanceOf(address(this)) == balanceBefore, "assets left the depositor");
+        require(vault.totalSupply() == alice, "supply moved on a reverted deposit");
+        require(vault.balanceOf(address(this)) == alice, "balance moved on a reverted deposit");
+        require(token.balanceOf(address(vault)) == 0, "tokens stranded in the vault");
+    }
+
+    /// @notice mint() is refused by the same guard, on the same state.
+    function test_MintRevertsWhenStrategyReportsZeroAssets() public {
+        uint256 alice = 40e18;
+        token.mint(address(this), alice);
+        token.approve(address(vault), alice);
+        vault.deposit(alice);
+
+        _drainStrategy();
+
+        token.mint(address(this), 40e18);
+        token.approve(address(vault), 40e18);
+        uint256 balanceBefore = token.balanceOf(address(this));
+
+        try vault.mint(10e18) returns (uint256) {
+            require(false, "mint into a wiped-out vault did not revert");
+        } catch {
+            // expected: "MinimalVault: no-price"
+        }
+
+        require(token.balanceOf(address(this)) == balanceBefore, "assets left the minter");
+        require(vault.totalSupply() == alice, "supply moved on a reverted mint");
+        require(vault.balanceOf(address(this)) == alice, "balance moved on a reverted mint");
+    }
+
+    /// @notice An EMPTY vault still bootstraps 1:1 - the guard rejects the wiped-out
+    /// state, not the first deposit. Redeem everything, then deposit again.
+    function test_EmptyVaultStillBootstrapsOneToOne() public {
+        uint256 amount = 10e18;
+        token.mint(address(this), amount);
+        token.approve(address(vault), amount);
+        vault.deposit(amount);
+
+        vault.redeem(amount);
+        require(vault.totalSupply() == 0, "setup: shares outstanding after full redeem");
+        require(vault.totalAssets() == 0, "setup: strategy still holds assets");
+
+        token.approve(address(vault), amount);
+        require(vault.deposit(amount) == amount, "empty vault did not bootstrap 1:1");
+    }
+
+    /// @notice Fuzz: a deposit that succeeds never lowers what an existing holder can
+    /// claim, and a deposit that cannot be priced changes nothing at all.
+    function testFuzz_DepositNeverLowersAnExistingHoldersClaim(
+        uint96 firstRaw,
+        uint96 yieldRaw,
+        uint96 secondRaw,
+        bool wipeOut
+    ) public {
+        uint256 first = (uint256(firstRaw) % 1e24) + 2;
+        uint256 yieldAmount = uint256(yieldRaw) % 1e24;
+        uint256 second = (uint256(secondRaw) % 1e24) + 1;
+
+        token.mint(address(this), first);
+        token.approve(address(vault), first);
+        require(vault.deposit(first) == first, "bootstrap not 1:1");
+
+        if (yieldAmount > 0) {
+            // "Yield" in this fixture is underlying transferred straight to the strategy.
+            token.mint(address(mock), yieldAmount);
+        }
+        if (wipeOut) {
+            _drainStrategy();
+        }
+
+        uint256 sharesHeld = vault.balanceOf(address(this));
+        uint256 supplyBefore = vault.totalSupply();
+        uint256 assetsBefore = vault.totalAssets();
+        uint256 claimBefore = vault.convertToAssets(sharesHeld);
+
+        token.mint(address(this), second);
+        token.approve(address(vault), second);
+        uint256 walletBefore = token.balanceOf(address(this));
+
+        try vault.deposit(second) returns (uint256 minted) {
+            require(!wipeOut, "deposit priced against a wiped-out vault");
+            require(minted > 0, "zero shares minted");
+            require(vault.totalSupply() == supplyBefore + minted, "supply and mint disagree");
+            require(vault.totalAssets() == assetsBefore + second, "strategy custody missing");
+            // The claim of the shares held before the deposit must not fall.
+            uint256 claimAfter =
+                (sharesHeld * vault.totalAssets()) / vault.totalSupply();
+            require(claimAfter >= claimBefore, "a deposit diluted an existing holder");
+        } catch {
+            // Refused: either "no-price" (wiped out) or "zero-shares" (dust against an
+            // inflated price). Either way nothing may have moved.
+            require(token.balanceOf(address(this)) == walletBefore, "assets left on a reverted deposit");
+            require(vault.totalSupply() == supplyBefore, "supply moved on a reverted deposit");
+            require(vault.totalAssets() == assetsBefore, "assets moved on a reverted deposit");
+            require(token.balanceOf(address(vault)) == 0, "tokens stranded in the vault");
+        }
+    }
 }
