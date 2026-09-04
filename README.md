@@ -95,6 +95,14 @@ proves the next deposit reverts rather than paying for zero shares. And after
 underlying can never be stranded in the vault where `totalAssets()` cannot see it and `withdraw()`
 cannot reach it; any allowance the strategy left unused is reset to zero.
 
+The same rounding discipline governs the exit. `redeem()` prices the assets it asks the strategy for
+with FLOOR (`shares * totalAssets / totalSupply`), so a redeemer is never paid more than the burned
+shares are worth: served in full it burns exactly `shares`, and on a strategy shortfall it burns only
+`ceil(withdrawn * totalSupply / totalAssets)` - the shares the payout actually covers. Every rounding
+step therefore favours the holders who stay, and the tests assert it directly as
+`totalAssetsAfter * totalSupplyBefore >= totalAssetsBefore * totalSupplyAfter` (assets per share
+never fall) in a donation case, a shortfall case and a fuzz run over deposit, yield and redeem sizes.
+
 Fixtures live under `test/mocks/`: `MockERC20.sol` (a minimal mint/approve/transferFrom token),
 `MockNonStandardERC20.sol` (the USDT-style token described above),
 `MockPartialPullStrategy.sol` (a deliberately misbehaving `IStrategy` whose `deposit()` pulls only a

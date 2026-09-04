@@ -105,29 +105,53 @@ contract MinimalVault {
         return withdrawn;
     }
 
-    /// @notice Redeem `shares` for underlying. Attempts to withdraw the assets
-    /// corresponding to `shares`, handles strategy shortfalls by burning proportionate
-    /// shares for the actual amount returned.
+    /// @notice Redeem `shares` for underlying.
+    /// @dev Rounding runs in the VAULT's favour, which is the only direction an
+    /// ERC-4626-style redemption may round:
+    /// - the assets asked of the strategy are priced with FLOOR
+    ///   (`shares * totalAssets / totalSupply`), so a redeemer can never be paid more
+    ///   than the burned shares are worth;
+    /// - when the strategy serves the request in full, exactly `shares` are burned;
+    /// - on a shortfall only the shares the payout actually covers are burned, rounded
+    ///   UP (`ceil(withdrawn * totalSupply / totalAssets)`), so the shortfall costs the
+    ///   redeemer nothing extra but never leaves shares un-burned.
+    ///
+    /// The old code asked for a rounded-UP amount and then CAPPED the burn at `shares`.
+    /// That cap was conservative for the caller, not for the vault: a dust redeem against
+    /// an inflated share price (deposit 3, donate 7 to the strategy, redeem 1) was paid
+    /// 4 assets for a share worth 3.33 and the remaining holders paid the difference.
+    /// With floor pricing the cap can no longer bind, so it is kept as an assertion.
     function redeem(uint256 shares) external returns (uint256 withdrawn) {
-        uint256 totalAssetsBefore = strategy.totalAssets();
-        require(totalSupply > 0, "no-supply");
+        require(shares > 0, "MinimalVault: zero-shares");
+        require(balanceOf[msg.sender] >= shares, "insufficient shares");
 
-        // Compute assets to request (ceil) so we ask for enough to cover the shares.
-        uint256 assetsRequested = (shares * totalAssetsBefore + totalSupply - 1) / totalSupply;
+        uint256 totalAssetsBefore = strategy.totalAssets();
+        uint256 totalSupplyBefore = totalSupply;
+        require(totalSupplyBefore > 0 && totalAssetsBefore > 0, "no-liquidity");
+
+        // FLOOR: never ask the strategy for more than the shares are worth.
+        uint256 assetsRequested = (shares * totalAssetsBefore) / totalSupplyBefore;
+        require(assetsRequested > 0, "MinimalVault: zero-assets");
 
         uint256 before = tokenBalanceOf(address(this));
         uint256 got = strategy.withdraw(assetsRequested);
         uint256 balanceAfter = tokenBalanceOf(address(this));
         withdrawn = balanceAfter - before;
         require(got == withdrawn, "MinimalVault: strategy returned mismatch");
+        require(withdrawn <= assetsRequested, "MinimalVault: strategy overpaid");
 
-        // Compute shares to burn proportional to actual withdrawn (ceil)
-        uint256 sharesToBurn = totalAssetsBefore == 0 ? 0 : (withdrawn * totalSupply + totalAssetsBefore - 1) / totalAssetsBefore;
-        if (sharesToBurn > shares) {
-            // Never burn more shares than caller offered; cap conservatively.
+        uint256 sharesToBurn;
+        if (withdrawn == assetsRequested) {
+            // Served in full: the caller pays with every share offered.
             sharesToBurn = shares;
+        } else {
+            // Shortfall: burn only what the payout covers, rounded up.
+            sharesToBurn = (withdrawn * totalSupplyBefore + totalAssetsBefore - 1) / totalAssetsBefore;
+            // withdrawn < floor(shares * totalAssets / totalSupply) makes this strictly
+            // smaller than `shares`; the old cap is an assertion now, not a discount.
+            require(sharesToBurn <= shares, "MinimalVault: burn exceeds shares offered");
         }
-        require(balanceOf[msg.sender] >= sharesToBurn, "insufficient shares");
+
         balanceOf[msg.sender] -= sharesToBurn;
         totalSupply -= sharesToBurn;
 
