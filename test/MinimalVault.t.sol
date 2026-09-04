@@ -174,6 +174,130 @@ contract MinimalVaultTest {
         require(token.allowance(address(v2), address(partial)) == 0, "allowance left dangling");
     }
 
+    // --- Redemption rounding (a redeem must never dilute the holders who stay) ---
+
+    /// @notice The donation case: a dust redeem against an inflated share price must not
+    /// pay out more than the burned share is worth.
+    /// @dev Deposit 3 wei (totalSupply 3), then push 7 wei straight into the strategy so
+    /// totalAssets is 10 and one share is worth 3.33. The old code asked for
+    /// ceil(1 * 10 / 3) == 4, was paid 4, computed ceil(4 * 3 / 10) == 2 shares to burn and
+    /// then capped the burn at the 1 share offered - paying 4 for 3.33 and dropping assets
+    /// per share for everyone left from 3.33 to 3.00. Floor pricing asks for 3 and burns 1.
+    function test_RedeemDoesNotOverpayOnDonationInflatedPrice() public {
+        token.mint(address(this), 3);
+        token.approve(address(vault), 3);
+        require(vault.deposit(3) == 3, "bootstrap not 1:1");
+
+        // Donation straight to the strategy: no shares minted for it.
+        token.mint(address(mock), 7);
+
+        uint256 taBefore = vault.totalAssets();
+        uint256 tsBefore = vault.totalSupply();
+        require(taBefore == 10 && tsBefore == 3, "setup: expected 10 assets over 3 shares");
+
+        uint256 balBefore = token.balanceOf(address(this));
+        uint256 withdrawn = vault.redeem(1);
+        uint256 delta = token.balanceOf(address(this)) - balBefore;
+
+        require(withdrawn == delta, "redeem return mismatch");
+        require(withdrawn == 3, "redeem paid more than the share was worth");
+        require(vault.balanceOf(address(this)) == 2, "wrong number of shares burned");
+
+        uint256 taAfter = vault.totalAssets();
+        uint256 tsAfter = vault.totalSupply();
+        // assets per share must not fall: taAfter/tsAfter >= taBefore/tsBefore
+        require(taAfter * tsBefore >= taBefore * tsAfter, "assets per share fell on redeem");
+    }
+
+    /// @notice A strategy shortfall burns only the shares the payout actually covers.
+    function test_RedeemShortfallBurnsOnlyWhatWasPaidFor() public {
+        uint256 amount = 1_000e18;
+        token.mint(address(this), amount);
+        token.approve(address(vault), amount);
+        vault.deposit(amount);
+
+        // Only 400e18 of the 1000e18 position is redeemable this block.
+        mock.setIlliquid(600e18);
+
+        uint256 taBefore = vault.totalAssets();
+        uint256 tsBefore = vault.totalSupply();
+
+        uint256 balBefore = token.balanceOf(address(this));
+        uint256 withdrawn = vault.redeem(amount); // asks for all 1000e18, gets 400e18
+        uint256 delta = token.balanceOf(address(this)) - balBefore;
+
+        require(withdrawn == delta, "redeem return mismatch");
+        require(withdrawn == 400e18, "unexpected shortfall payout");
+        require(vault.balanceOf(address(this)) == 600e18, "burned shares the payout did not cover");
+        require(vault.totalSupply() == 600e18, "supply and balance disagree");
+
+        uint256 taAfter = vault.totalAssets();
+        uint256 tsAfter = vault.totalSupply();
+        require(taAfter * tsBefore >= taBefore * tsAfter, "assets per share fell on a shortfall redeem");
+    }
+
+    /// @notice redeem(0) and a redeem above the caller's balance are rejected outright.
+    function test_RedeemRevertsOnZeroSharesAndOnOverdraft() public {
+        uint256 amount = 100e18;
+        token.mint(address(this), amount);
+        token.approve(address(vault), amount);
+        vault.deposit(amount);
+
+        try vault.redeem(0) returns (uint256) {
+            require(false, "redeem(0) did not revert");
+        } catch {}
+
+        try vault.redeem(amount + 1) returns (uint256) {
+            require(false, "redeem above balance did not revert");
+        } catch {}
+
+        require(vault.balanceOf(address(this)) == amount, "shares moved on a reverted redeem");
+        require(vault.totalSupply() == amount, "supply moved on a reverted redeem");
+    }
+
+    /// @notice Fuzz: over any deposit, any donated yield and any redeem size, the assets
+    /// backing each remaining share never fall, and a redeem is never paid more than the
+    /// floor value of the shares it burns.
+    function testFuzz_RedeemNeverDilutesRemainingHolders(
+        uint96 depositRaw,
+        uint96 yieldRaw,
+        uint96 redeemRaw
+    ) public {
+        uint256 depositAmount = (uint256(depositRaw) % 1e24) + 2;
+        uint256 yieldAmount = uint256(yieldRaw) % 1e24;
+
+        token.mint(address(this), depositAmount);
+        token.approve(address(vault), depositAmount);
+        require(vault.deposit(depositAmount) == depositAmount, "bootstrap not 1:1");
+
+        if (yieldAmount > 0) {
+            // "Yield" in this fixture is underlying transferred straight to the strategy.
+            token.mint(address(mock), yieldAmount);
+        }
+
+        uint256 shares = (uint256(redeemRaw) % vault.balanceOf(address(this))) + 1;
+
+        uint256 taBefore = vault.totalAssets();
+        uint256 tsBefore = vault.totalSupply();
+        uint256 floorAssets = (shares * taBefore) / tsBefore;
+        if (floorAssets == 0) {
+            // Dust worth less than one wei of underlying: the vault must refuse it.
+            try vault.redeem(shares) returns (uint256) {
+                require(false, "redeem paid out for a zero-asset quote");
+            } catch {}
+            return;
+        }
+
+        uint256 balBefore = token.balanceOf(address(this));
+        uint256 withdrawn = vault.redeem(shares);
+        require(withdrawn == token.balanceOf(address(this)) - balBefore, "redeem return mismatch");
+        require(withdrawn <= floorAssets, "redeem paid more than the shares were worth");
+
+        uint256 taAfter = vault.totalAssets();
+        uint256 tsAfter = vault.totalSupply();
+        require(taAfter * tsBefore >= taBefore * tsAfter, "assets per share fell on redeem");
+    }
+
     /// @notice mint() keeps the same custody and allowance properties as deposit().
     function test_MintTakesCustodyAndLeavesNoAllowance() public {
         uint256 shares = 1_000e18;
