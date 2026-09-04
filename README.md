@@ -132,6 +132,30 @@ doubled quote) and then that every nested `deposit` and `mint` during `withdraw(
 afterwards. The cost is one warm SSTORE per call, and a strategy that legitimately re-enters the
 vault is refused - deliberate.
 
+All of those vault tests are single shots. `test/MinimalVaultInvariants.t.sol` is the stateful half:
+Foundry drives random SEQUENCES of deposits, mints, withdrawals, redemptions, harvests, lockups and
+injected yield through `test/handlers/VaultHandler.sol`, and after every sequence it asserts
+
+- assets per share never fall, compared cross-multiplied
+  (`assetsAfter * supplyBefore >= assetsBefore * supplyAfter`) against the pair recorded when the
+  last action started, so there is no division and no dust tolerance;
+- the modelled holders' balances still add up to `totalSupply`;
+- the vault holds no underlying between calls, which is `_assertStrategyPulled` seen from outside;
+- assets paid out never exceed assets deposited plus the yield that really arrived;
+- the pricing views never revert, in any state a sequence can reach;
+- every per-call post-condition the handler checked held on every call - a successful deposit never
+  priced a wiped-out vault, a redemption never took more than the shares offered were worth, a
+  withdrawal never burned too few shares, and each entry point's return value was the caller's own
+  balance delta.
+
+Because `MinimalVault` credits `msg.sender` and this suite uses no cheatcodes, the handler owns three
+`VaultActor` contracts (declared in the same file) that hold the shares; each refuses any caller but
+the handler. The handler records post-condition failures in a counter instead of reverting, exactly
+as `StrategyHandler` does, and a revert from the vault is generally NOT a failure - refusing a
+zero-share deposit or a "no-price" deposit is the merged behaviour under test. The reentrancy guard
+is asserted indirectly, since `_locked` is private: a vault left latched would stop moving the ledger
+totals altogether.
+
 Fixtures live under `test/mocks/`: `MockERC20.sol` (a minimal mint/approve/transferFrom token),
 `MockNonStandardERC20.sol` (the USDT-style token described above),
 `MockPartialPullStrategy.sol` (a deliberately misbehaving `IStrategy` whose `deposit()` pulls only a
