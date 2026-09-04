@@ -26,7 +26,12 @@ contract MinimalVault {
     /// @dev Pulls from caller, approves strategy exactly, calls strategy.deposit(amount)
     /// and mints shares using conservative (floor) rounding. Returns minted shares.
     ///
-    /// Two guards make the floor rounding safe to keep:
+    /// Three guards make the floor rounding safe to keep:
+    /// - the vault must be able to PRICE the deposit: an empty vault (`totalSupply == 0`)
+    ///   bootstraps 1:1, but a vault with shares outstanding and `strategy.totalAssets()`
+    ///   at 0 - a total loss, an emergency unwind that ended empty, a strategy drained
+    ///   from outside - has no honest exchange rate and must refuse rather than mint 1:1
+    ///   against dead shares (see `_convertToShares`);
     /// - the share amount is computed BEFORE any token moves and must be non-zero, so a
     ///   depositor can never hand over assets and be minted nothing (the classic ERC-4626
     ///   first-depositor / donation inflation loss: donate to the strategy, and a later
@@ -38,6 +43,7 @@ contract MinimalVault {
         require(amount > 0, "MinimalVault: zero-assets");
 
         uint256 totalAssetsBefore = strategy.totalAssets();
+        require(totalSupply == 0 || totalAssetsBefore > 0, "MinimalVault: no-price");
 
         // Price the deposit against pre-deposit state, before any token moves.
         shares = _convertToShares(amount, totalAssetsBefore);
@@ -60,12 +66,15 @@ contract MinimalVault {
 
     /// @notice Mint `shares` by supplying the required underlying.
     /// @dev Computes required assets, pulls them, approves the strategy and deposits.
-    /// Mirrors the two guards in `deposit()`: no zero-share mint, and the strategy must
-    /// take custody of everything this call pulled in.
+    /// Mirrors the guards in `deposit()`: the vault must be able to price the mint, no
+    /// zero-share or zero-asset mint, and the strategy must take custody of everything
+    /// this call pulled in.
     function mint(uint256 shares) external returns (uint256 assets) {
         require(shares > 0, "MinimalVault: zero-shares");
 
         uint256 totalAssetsBefore = strategy.totalAssets();
+        require(totalSupply == 0 || totalAssetsBefore > 0, "MinimalVault: no-price");
+
         assets = _convertToAssetsForMint(shares, totalAssetsBefore);
         require(assets > 0, "MinimalVault: zero-assets");
 
@@ -199,16 +208,27 @@ contract MinimalVault {
         }
     }
 
+    /// @dev An EMPTY vault (no shares outstanding) bootstraps 1:1. A WIPED-OUT vault
+    /// (shares outstanding, no assets) is a different state entirely and must not be
+    /// priced 1:1: doing so mints new money at the same rate as the dead shares and hands
+    /// the newcomer's assets straight to them. There is no exchange rate to quote, so the
+    /// quote is 0 and `deposit()` / `mint()` refuse the call outright ("no-price").
     function _convertToShares(uint256 amount, uint256 totalAssetsBefore) internal view returns (uint256) {
-        if (totalSupply == 0 || totalAssetsBefore == 0) {
+        if (totalSupply == 0) {
             // Bootstrap: 1:1 initial share for asset to keep it simple and deterministic.
             return amount;
+        }
+        if (totalAssetsBefore == 0) {
+            // Shares outstanding, nothing behind them: no price, and no division by zero.
+            return 0;
         }
         return (amount * totalSupply) / totalAssetsBefore; // floor => conservative
     }
 
+    /// @dev With shares outstanding and no assets this returns 0 - shares backed by
+    /// nothing are worth nothing, and the view says so instead of quoting 1:1.
     function _convertToAssets(uint256 shares, uint256 totalAssetsBefore) internal view returns (uint256) {
-        if (totalSupply == 0 || totalAssetsBefore == 0) {
+        if (totalSupply == 0) {
             return shares;
         }
         return (shares * totalAssetsBefore) / totalSupply; // floor
@@ -216,7 +236,7 @@ contract MinimalVault {
 
     function _convertToAssetsForMint(uint256 shares, uint256 totalAssetsBefore) internal view returns (uint256) {
         // When minting, require the caller to send enough assets to cover shares.
-        if (totalSupply == 0 || totalAssetsBefore == 0) {
+        if (totalSupply == 0) {
             return shares;
         }
         // Ceil so we collect enough assets to back the minted shares.
