@@ -115,10 +115,29 @@ step therefore favours the holders who stay, and the tests assert it directly as
 `totalAssetsAfter * totalSupplyBefore >= totalAssetsBefore * totalSupplyAfter` (assets per share
 never fall) in a donation case, a shortfall case and a fuzz run over deposit, yield and redeem sizes.
 
+Every guard above protects a single call, and none of them survives a nested one - so the four
+state-changing entry points (`deposit`, `mint`, `withdraw`, `redeem`) are now single-entry
+(`nonReentrant`, revert string "MinimalVault: reentrancy"); the views are deliberately left open.
+The vault opens the window itself: `withdraw()` and `redeem()` call `strategy.withdraw()` BEFORE
+they burn shares, so between the strategy's push and its return the assets have left the strategy
+(`totalAssets()` is low) while `totalSupply` still counts the shares being redeemed, and
+`_convertToShares` prices against exactly that pair. With 100 assets over 100 shares, a redeem of 50
+that calls back - a hookful underlying, an ERC-777/ERC-1363 asset, a strategy routing through
+another contract - lets a nested `deposit(50)` mint 100 shares instead of 50: 150 shares against 100
+assets, half the vault taken from the holders who stayed. The earlier guards all pass on that path,
+because `_assertStrategyPulled` measures against a snapshot that already includes the in-transit
+assets. `test/MinimalVault.t.sol` proves the window is real (a read-only callback records the
+doubled quote) and then that every nested `deposit` and `mint` during `withdraw()`, `redeem()` and
+`strategy.deposit()` reverts the outer call whole with nothing moved, and that the flag is released
+afterwards. The cost is one warm SSTORE per call, and a strategy that legitimately re-enters the
+vault is refused - deliberate.
+
 Fixtures live under `test/mocks/`: `MockERC20.sol` (a minimal mint/approve/transferFrom token),
 `MockNonStandardERC20.sol` (the USDT-style token described above),
 `MockPartialPullStrategy.sol` (a deliberately misbehaving `IStrategy` whose `deposit()` pulls only a
-settable fraction, `pullBps`, so the vault's custody assertion is exercised) and
+settable fraction, `pullBps`, so the vault's custody assertion is exercised),
+`MockReentrantStrategy.sol` (a conforming `IStrategy` that, once armed, calls back into the
+`ReentrantDepositor` helper in the same file before returning from `deposit()` or `withdraw()`) and
 `MockStrategy.sol` (a reference `IStrategy` with a settable illiquid portion, and a `principal`
 baseline so `harvest()` reports realised gain while keeping custody). All are test fixtures only -
 unrestricted minting, no access control, no real yield source - and must never be deployed or
