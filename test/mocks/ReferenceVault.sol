@@ -3,7 +3,7 @@ pragma solidity ^0.8.19;
 
 import {IStrategy} from "../../src/interfaces/IStrategy.sol";
 import {MockERC20} from "./MockERC20.sol";
-import {SafeERC20} from "../../src/utils/SafeERC20.sol";
+import {SafeERC20, IERC20} from "../../src/utils/SafeERC20.sol";
 
 /// @title ReferenceVault (test-only)
 /// @notice Minimal, deliberately underspecified vault used only by the test-suite as a
@@ -19,7 +19,7 @@ import {SafeERC20} from "../../src/utils/SafeERC20.sol";
 /// - withdraw: calls strategy.withdraw(amount), receives the pushed tokens, then forwards
 ///   the exact amount the strategy returned to the original caller and returns it.
 contract ReferenceVault {
-    using SafeERC20 for MockERC20;
+    using SafeERC20 for IERC20;
 
     MockERC20 public immutable token;
     IStrategy public immutable strategy;
@@ -29,15 +29,21 @@ contract ReferenceVault {
         strategy = strategy_;
     }
 
+    /// @dev The token as the interface SafeERC20 is written against. MockERC20 does not
+    /// inherit IERC20, so the library is attached to IERC20 and the mock is wrapped here.
+    function _token() internal view returns (IERC20) {
+        return IERC20(address(token));
+    }
+
     /// @notice Pulls `amount` from the caller into this contract, approves the strategy
     /// for exactly `amount`, and calls strategy.deposit(amount). After the call the
     /// contract's allowance for the strategy MUST be 0 (the strategy pulled the funds).
     function deposit(uint256 amount) external {
         // Pull from caller into the vault first.
-        token.safeTransferFrom(msg.sender, address(this), amount);
+        _token().safeTransferFrom(msg.sender, address(this), amount);
 
         // Approve the strategy for exactly the amount we intend to send it.
-        token.safeApprove(address(strategy), amount);
+        _token().safeApprove(address(strategy), amount);
 
         // Let the strategy pull from this vault. It must consume the allowance.
         strategy.deposit(amount);
@@ -54,7 +60,7 @@ contract ReferenceVault {
         uint256 delta = token.balanceOf(address(this)) - before;
         require(withdrawn == delta, "ReferenceVault: strategy returned mismatch");
         if (withdrawn > 0) {
-            token.safeTransfer(msg.sender, withdrawn);
+            _token().safeTransfer(msg.sender, withdrawn);
         }
         return withdrawn;
     }

@@ -66,8 +66,8 @@ contract MinimalVault {
 
         uint256 before = tokenBalanceOf(address(this));
         uint256 got = strategy.withdraw(assets);
-        uint256 after = tokenBalanceOf(address(this));
-        withdrawn = after - before;
+        uint256 balanceAfter = tokenBalanceOf(address(this));
+        withdrawn = balanceAfter - before;
         require(got == withdrawn, "MinimalVault: strategy returned mismatch");
 
         // Burn shares proportional to withdrawn amount (ceil)
@@ -94,8 +94,8 @@ contract MinimalVault {
 
         uint256 before = tokenBalanceOf(address(this));
         uint256 got = strategy.withdraw(assetsRequested);
-        uint256 after = tokenBalanceOf(address(this));
-        withdrawn = after - before;
+        uint256 balanceAfter = tokenBalanceOf(address(this));
+        withdrawn = balanceAfter - before;
         require(got == withdrawn, "MinimalVault: strategy returned mismatch");
 
         // Compute shares to burn proportional to actual withdrawn (ceil)

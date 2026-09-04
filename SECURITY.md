@@ -48,6 +48,12 @@ Reentrancy and approvals
 - Because the strategy pulls, the Vault should approve exactly what it is depositing rather than
   leaving a standing unlimited allowance, and should treat any leftover allowance after deposit()
   as a finding.
+- Exact approvals mean the Vault repeatedly writes a non-zero allowance, and some widely held
+  tokens (USDT and its imitators) revert when a non-zero allowance is changed straight to another
+  non-zero value. `SafeERC20.safeApprove` in `src/utils/SafeERC20.sol` therefore resets the
+  allowance to zero first whenever the current allowance and the new value are both non-zero;
+  setting an allowance from zero, or back to zero, is still a single call. Any new call site that
+  sets an allowance must go through `safeApprove` rather than calling `approve` directly.
 
 Fees and accounting
 - Fee expectations (e.g., basis points) are not locked in this cycle; any fees introduced
