@@ -78,8 +78,17 @@ in Foundry's targeting turns them off rather than producing a false failure. Run
 live in the `[profile.default.invariant]` section of `foundry.toml` (`[profile.ci.invariant]` is the
 longer CI setting).
 
-Fixtures live under `test/mocks/`: `MockERC20.sol` (a minimal mint/approve/transferFrom token) and
+`test/SafeERC20Approve.t.sol` covers the approval helper the vaults use. Because the vault approves
+the strategy for exactly the amount it is depositing, it writes a non-zero allowance again and
+again, and some real tokens (USDT and its imitators) revert on a non-zero to non-zero change.
+`SafeERC20.safeApprove` resets the allowance to zero first when both the current allowance and the
+new value are non-zero, and the tests prove it against `test/mocks/MockNonStandardERC20.sol` - a
+fixture that reverts on exactly that change and returns no boolean from `approve`, `transfer` or
+`transferFrom` - while leaving the single-call behaviour intact for a well-behaved token.
+
+Fixtures live under `test/mocks/`: `MockERC20.sol` (a minimal mint/approve/transferFrom token),
+`MockNonStandardERC20.sol` (the USDT-style token described above) and
 `MockStrategy.sol` (a reference `IStrategy` with a settable illiquid portion, and a `principal`
-baseline so `harvest()` reports realised gain while keeping custody). Both are test fixtures only -
+baseline so `harvest()` reports realised gain while keeping custody). All are test fixtures only -
 unrestricted minting, no access control, no real yield source - and must never be deployed or
 treated as an audited strategy.

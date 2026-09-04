@@ -2,10 +2,16 @@
 pragma solidity ^0.8.19;
 
 /// @notice Minimal IERC20 interface used by SafeERC20.
+/// @dev `allowance` is required by `SafeERC20.safeApprove`, which resets a non-zero
+/// allowance to zero before setting a new non-zero one (see the library below).
+/// `balanceOf` is declared so callers that hold the token as `IERC20` (for example
+/// `src/vault/MinimalVault.sol`) can read balances without a second interface.
 interface IERC20 {
     function transfer(address to, uint256 value) external returns (bool);
     function transferFrom(address from, address to, uint256 value) external returns (bool);
     function approve(address spender, uint256 value) external returns (bool);
+    function allowance(address owner, address spender) external view returns (uint256);
+    function balanceOf(address account) external view returns (uint256);
 }
 
 /// @title SafeERC20 (minimal, dependency-free)
@@ -25,7 +31,17 @@ library SafeERC20 {
         _callOptionalReturn(token, abi.encodeWithSelector(SELECTOR_TRANSFER_FROM, from, to, value));
     }
 
+    /// @notice Sets `spender`'s allowance to exactly `value`, tolerating tokens that
+    /// forbid a direct non-zero -> non-zero allowance change (the USDT-style rule).
+    /// @dev When the current allowance is non-zero and `value` is non-zero, the allowance
+    /// is first written down to zero and only then set to `value`. Setting an allowance to
+    /// zero, or setting one from zero, is a single call exactly as before. Both calls go
+    /// through `_callOptionalReturn`, so tokens that return nothing are still accepted.
+    /// This costs one extra `approve` in the reset case; it is the widely used mitigation.
     function safeApprove(IERC20 token, address spender, uint256 value) internal {
+        if (value != 0 && token.allowance(address(this), spender) != 0) {
+            _callOptionalReturn(token, abi.encodeWithSelector(SELECTOR_APPROVE, spender, uint256(0)));
+        }
         _callOptionalReturn(token, abi.encodeWithSelector(SELECTOR_APPROVE, spender, value));
     }
 
