@@ -86,8 +86,19 @@ new value are non-zero, and the tests prove it against `test/mocks/MockNonStanda
 fixture that reverts on exactly that change and returns no boolean from `approve`, `transfer` or
 `transferFrom` - while leaving the single-call behaviour intact for a well-behaved token.
 
+`test/MinimalVault.t.sol` covers the deposit and mint paths of `src/vault/MinimalVault.sol`,
+including the two guards that keep the conservative (floor) share rounding safe. A deposit whose
+share amount rounds down to zero reverts instead of taking the assets and minting nothing - the
+donation case in the tests inflates `MockStrategy.totalAssets()` with a direct transfer and then
+proves the next deposit reverts rather than paying for zero shares. And after
+`strategy.deposit(amount)` the vault requires its own token balance to be back where it started, so
+underlying can never be stranded in the vault where `totalAssets()` cannot see it and `withdraw()`
+cannot reach it; any allowance the strategy left unused is reset to zero.
+
 Fixtures live under `test/mocks/`: `MockERC20.sol` (a minimal mint/approve/transferFrom token),
-`MockNonStandardERC20.sol` (the USDT-style token described above) and
+`MockNonStandardERC20.sol` (the USDT-style token described above),
+`MockPartialPullStrategy.sol` (a deliberately misbehaving `IStrategy` whose `deposit()` pulls only a
+settable fraction, `pullBps`, so the vault's custody assertion is exercised) and
 `MockStrategy.sol` (a reference `IStrategy` with a settable illiquid portion, and a `principal`
 baseline so `harvest()` reports realised gain while keeping custody). All are test fixtures only -
 unrestricted minting, no access control, no real yield source - and must never be deployed or

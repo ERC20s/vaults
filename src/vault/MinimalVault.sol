@@ -25,17 +25,33 @@ contract MinimalVault {
     /// @notice Deposit `amount` underlying and receive shares.
     /// @dev Pulls from caller, approves strategy exactly, calls strategy.deposit(amount)
     /// and mints shares using conservative (floor) rounding. Returns minted shares.
+    ///
+    /// Two guards make the floor rounding safe to keep:
+    /// - the share amount is computed BEFORE any token moves and must be non-zero, so a
+    ///   depositor can never hand over assets and be minted nothing (the classic ERC-4626
+    ///   first-depositor / donation inflation loss: donate to the strategy, and a later
+    ///   deposit rounds down to 0 shares);
+    /// - the strategy must have pulled exactly `amount` out of this vault by the time
+    ///   `deposit()` returns, which is the pull-based custody rule in
+    ///   `src/interfaces/IStrategy.sol` stated as an assertion instead of a comment.
     function deposit(uint256 amount) external returns (uint256 shares) {
+        require(amount > 0, "MinimalVault: zero-assets");
+
         uint256 totalAssetsBefore = strategy.totalAssets();
 
+        // Price the deposit against pre-deposit state, before any token moves.
+        shares = _convertToShares(amount, totalAssetsBefore);
+        require(shares > 0, "MinimalVault: zero-shares");
+
         // Pull tokens from caller into the vault
+        uint256 vaultBefore = tokenBalanceOf(address(this));
         token.safeTransferFrom(msg.sender, address(this), amount);
 
         // Approve strategy for exactly amount and let it pull
         token.safeApprove(address(strategy), amount);
         strategy.deposit(amount);
+        _assertStrategyPulled(vaultBefore);
 
-        shares = _convertToShares(amount, totalAssetsBefore);
         // Mint shares
         totalSupply += shares;
         balanceOf[msg.sender] += shares;
@@ -44,13 +60,20 @@ contract MinimalVault {
 
     /// @notice Mint `shares` by supplying the required underlying.
     /// @dev Computes required assets, pulls them, approves the strategy and deposits.
+    /// Mirrors the two guards in `deposit()`: no zero-share mint, and the strategy must
+    /// take custody of everything this call pulled in.
     function mint(uint256 shares) external returns (uint256 assets) {
+        require(shares > 0, "MinimalVault: zero-shares");
+
         uint256 totalAssetsBefore = strategy.totalAssets();
         assets = _convertToAssetsForMint(shares, totalAssetsBefore);
+        require(assets > 0, "MinimalVault: zero-assets");
 
+        uint256 vaultBefore = tokenBalanceOf(address(this));
         token.safeTransferFrom(msg.sender, address(this), assets);
         token.safeApprove(address(strategy), assets);
         strategy.deposit(assets);
+        _assertStrategyPulled(vaultBefore);
 
         totalSupply += shares;
         balanceOf[msg.sender] += shares;
@@ -135,6 +158,23 @@ contract MinimalVault {
     }
 
     // --- Internals ---
+
+    /// @dev Asserts the strategy took custody of everything the vault just pulled in, and
+    /// clears any allowance the strategy left behind.
+    ///
+    /// The check reads the VAULT's own token balance, not `strategy.totalAssets()`, so a
+    /// strategy that charges a deposit fee or reports assets in its own way is unaffected:
+    /// all that is required is that no underlying is left stranded here. Stranded tokens
+    /// would be invisible to `totalAssets()` and unreachable through `withdraw()`, which
+    /// measures only its own balance delta.
+    function _assertStrategyPulled(uint256 vaultBefore) internal {
+        require(tokenBalanceOf(address(this)) == vaultBefore, "MinimalVault: strategy did not pull");
+        // A conforming strategy consumes the whole allowance; clear any residue either way.
+        if (token.allowance(address(this), address(strategy)) != 0) {
+            token.safeApprove(address(strategy), 0);
+        }
+    }
+
     function _convertToShares(uint256 amount, uint256 totalAssetsBefore) internal view returns (uint256) {
         if (totalSupply == 0 || totalAssetsBefore == 0) {
             // Bootstrap: 1:1 initial share for asset to keep it simple and deterministic.
