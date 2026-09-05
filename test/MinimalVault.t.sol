@@ -25,12 +25,15 @@ contract MinimalVaultTest {
         token.mint(address(this), amount);
         token.approve(address(vault), amount);
 
+        // Preview before execution and assert it matches the minted shares.
+        uint256 preview = vault.previewDeposit(amount);
         uint256 shares = vault.deposit(amount);
 
         require(token.allowance(address(vault), address(mock)) == 0, "allowance not consumed");
         require(token.balanceOf(address(mock)) == amount, "strategy custody missing");
         require(shares > 0, "no shares minted");
         require(vault.totalAssets() == mock.totalAssets(), "assets not forwarded");
+        require(preview == shares, "previewDeposit != actual shares minted");
     }
 
     function test_WithdrawHandlesShortfallAndForwardsReturn() public {

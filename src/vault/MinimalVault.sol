@@ -228,6 +228,72 @@ contract MinimalVault {
         return strategy.maxWithdraw();
     }
 
+    /// @notice Forwarded per-owner max withdraw: the lesser of the owner's floor-priced claim
+    /// and the strategy's reported liquidity. Uses a single `strategy.totalAssets()` read.
+    function maxWithdraw(address owner) external view returns (uint256) {
+        uint256 totalAssetsBefore = strategy.totalAssets();
+        // If the strategy reports zero while shares exist, the vault has no price and owners' claims are zero.
+        if (totalSupply > 0 && totalAssetsBefore == 0) return 0;
+        uint256 ownerClaim = _convertToAssets(balanceOf[owner], totalAssetsBefore);
+        uint256 strategyCap = strategy.maxWithdraw();
+        return ownerClaim <= strategyCap ? ownerClaim : strategyCap;
+    }
+
+    /// @notice Per-owner max redeem: the largest share count whose floor-priced assets fit
+    /// within the owner's withdraw cap. Computed from a single `strategy.totalAssets()` read.
+    function maxRedeem(address owner) external view returns (uint256) {
+        uint256 totalAssetsBefore = strategy.totalAssets();
+        if (totalSupply == 0 || totalAssetsBefore == 0) return 0;
+        uint256 ownerClaim = _convertToAssets(balanceOf[owner], totalAssetsBefore);
+        uint256 strategyCap = strategy.maxWithdraw();
+        uint256 cap = ownerClaim <= strategyCap ? ownerClaim : strategyCap;
+        // Solve for shares: floor(shares * totalAssetsBefore / totalSupply) <= cap
+        uint256 shares = (cap * totalSupply) / totalAssetsBefore;
+        if (shares > balanceOf[owner]) return balanceOf[owner];
+        return shares;
+    }
+
+    /// @notice Max deposit allowed by the vault. When the vault has shares but the strategy
+    /// reports zero assets (a wiped-out vault) the vault refuses new deposits off-chain.
+    function maxDeposit(address) external view returns (uint256) {
+        uint256 totalAssetsBefore = strategy.totalAssets();
+        if (totalSupply > 0 && totalAssetsBefore == 0) return 0;
+        return type(uint256).max;
+    }
+
+    /// @notice Max mint allowed by the vault. When the vault has shares but the strategy
+    /// reports zero assets (a wiped-out vault) the vault refuses new mints off-chain.
+    function maxMint(address) external view returns (uint256) {
+        uint256 totalAssetsBefore = strategy.totalAssets();
+        if (totalSupply > 0 && totalAssetsBefore == 0) return 0;
+        return type(uint256).max;
+    }
+
+    /// @notice Preview how many shares a deposit of `amount` would mint (floor).
+    function previewDeposit(uint256 amount) external view returns (uint256) {
+        return _convertToShares(amount, strategy.totalAssets());
+    }
+
+    /// @notice Preview how many assets a mint of `shares` would cost (ceil).
+    /// Returns 0 when the vault has shares but the strategy reports zero assets (wiped-out).
+    function previewMint(uint256 shares) external view returns (uint256) {
+        uint256 totalAssetsBefore = strategy.totalAssets();
+        if (totalSupply > 0 && totalAssetsBefore == 0) return 0;
+        return _convertToAssetsForMint(shares, totalAssetsBefore);
+    }
+
+    /// @notice Preview how many shares would be burned to withdraw `assets` (ceil).
+    function previewWithdraw(uint256 assets) external view returns (uint256) {
+        uint256 totalAssetsBefore = strategy.totalAssets();
+        if (totalSupply == 0 || totalAssetsBefore == 0) return 0;
+        return (assets * totalSupply + totalAssetsBefore - 1) / totalAssetsBefore;
+    }
+
+    /// @notice Preview how many assets redeeming `shares` would return (floor).
+    function previewRedeem(uint256 shares) external view returns (uint256) {
+        return _convertToAssets(shares, strategy.totalAssets());
+    }
+
     /// @notice Convert `amount` assets to shares using conservative floor rounding.
     function convertToShares(uint256 amount) external view returns (uint256) {
         return _convertToShares(amount, strategy.totalAssets());
