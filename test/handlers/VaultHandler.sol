@@ -194,6 +194,9 @@ contract VaultHandler {
         (uint256 assetsBefore, uint256 supplyBefore) = _snapshot();
 
         uint256 needed = _previewMint(shares, assetsBefore, supplyBefore);
+        // Cross-check: the handler's mirror must match the vault's own preview.
+        uint256 vaultNeeded = vault.previewMint(shares);
+        _check(needed == vaultNeeded, "_previewMint desynchronised from vault.previewMint");
         // Out of this fixture's range: skip rather than mint an implausible pile of tokens.
         if (needed == 0 || needed > MAX_ACTION) return;
 
@@ -421,6 +424,27 @@ contract VaultHandler {
     {
         if (shares == 0 || supplyBefore == 0) return 0;
         return (shares * assetsBefore) / supplyBefore;
+    }
+
+    /// @dev Mirrors `MinimalVault._convertToShares` (floor) for deposit previews.
+    function _previewDeposit(uint256 amount, uint256 assetsBefore, uint256 supplyBefore)
+        internal
+        pure
+        returns (uint256)
+    {
+        if (supplyBefore == 0) return amount;
+        if (assetsBefore == 0) return 0;
+        return (amount * supplyBefore) / assetsBefore;
+    }
+
+    /// @dev Mirrors the ceiling share burn computed by `MinimalVault.withdraw`.
+    function _previewWithdraw(uint256 assets, uint256 assetsBefore, uint256 supplyBefore)
+        internal
+        pure
+        returns (uint256)
+    {
+        if (supplyBefore == 0 || assetsBefore == 0) return 0;
+        return (assets * supplyBefore + assetsBefore - 1) / assetsBefore;
     }
 
     /// @dev Records a broken post-condition instead of reverting. See the contract doc.
