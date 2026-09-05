@@ -21,6 +21,11 @@ contract MinimalVault {
     uint256 private constant _NOT_ENTERED = 1;
     uint256 private constant _ENTERED = 2;
 
+    /// @dev Standard ERC-4626 Deposit and Withdraw events, plus ERC20 Transfer for shares.
+    event Deposit(address indexed caller, address indexed owner, uint256 assets, uint256 shares);
+    event Withdraw(address indexed caller, address indexed receiver, uint256 assets, uint256 shares);
+    event Transfer(address indexed from, address indexed to, uint256 value);
+
     /// @dev Single-entry flag for the state-changing entry points. Starts (and returns) at
     /// `_NOT_ENTERED`, so the slot is warm and every call after the first pays only a warm
     /// SSTORE for the guard.
@@ -101,6 +106,11 @@ contract MinimalVault {
         // Mint shares
         totalSupply += shares;
         balanceOf[msg.sender] += shares;
+
+        // Emit standard ERC-4626 Deposit and ERC20 Transfer (mint) logs
+        emit Deposit(msg.sender, msg.sender, amount, shares);
+        emit Transfer(address(0), msg.sender, shares);
+
         return shares;
     }
 
@@ -126,6 +136,11 @@ contract MinimalVault {
 
         totalSupply += shares;
         balanceOf[msg.sender] += shares;
+
+        // Emit standard ERC-4626 Deposit and ERC20 Transfer (mint) logs
+        emit Deposit(msg.sender, msg.sender, assets, shares);
+        emit Transfer(address(0), msg.sender, shares);
+
         return assets;
     }
 
@@ -151,6 +166,10 @@ contract MinimalVault {
         require(balanceOf[msg.sender] >= sharesToBurn, "insufficient shares");
         balanceOf[msg.sender] -= sharesToBurn;
         totalSupply -= sharesToBurn;
+
+        // Emit standard ERC-4626 Withdraw and ERC20 Transfer (burn) logs
+        emit Withdraw(msg.sender, msg.sender, withdrawn, sharesToBurn);
+        emit Transfer(msg.sender, address(0), sharesToBurn);
 
         if (withdrawn > 0) {
             token.safeTransfer(msg.sender, withdrawn);
@@ -211,6 +230,10 @@ contract MinimalVault {
 
         balanceOf[msg.sender] -= sharesToBurn;
         totalSupply -= sharesToBurn;
+
+        // Emit standard ERC-4626 Withdraw and ERC20 Transfer (burn) logs
+        emit Withdraw(msg.sender, msg.sender, withdrawn, sharesToBurn);
+        emit Transfer(msg.sender, address(0), sharesToBurn);
 
         if (withdrawn > 0) {
             token.safeTransfer(msg.sender, withdrawn);
