@@ -18,13 +18,25 @@ contract MinimalVault {
     mapping(address => uint256) public balanceOf;
     uint256 public totalSupply;
 
+    /// @dev ERC-20 allowances for vault shares. Spender-approved amounts are consumed by
+    /// `transferFrom`; a max (`type(uint256).max`) approval is left untouched, matching the
+    /// common infinite-approval convention.
+    mapping(address => mapping(address => uint256)) public allowance;
+
+    /// @notice Cosmetic ERC-20 metadata so wallets and tooling show a sensible label. Purely
+    /// informational: nothing in the vault's accounting reads these.
+    string public constant name = "MinimalVault Share";
+    string public constant symbol = "mVLT";
+    uint8 public constant decimals = 18;
+
     uint256 private constant _NOT_ENTERED = 1;
     uint256 private constant _ENTERED = 2;
 
-    /// @dev Standard ERC-4626 Deposit and Withdraw events, plus ERC20 Transfer for shares.
+    /// @dev Standard ERC-4626 Deposit and Withdraw events, plus ERC20 Transfer/Approval for shares.
     event Deposit(address indexed caller, address indexed owner, uint256 assets, uint256 shares);
     event Withdraw(address indexed caller, address indexed receiver, uint256 assets, uint256 shares);
     event Transfer(address indexed from, address indexed to, uint256 value);
+    event Approval(address indexed owner, address indexed spender, uint256 value);
 
     /// @dev Single-entry flag for the state-changing entry points. Starts (and returns) at
     /// `_NOT_ENTERED`, so the slot is warm and every call after the first pays only a warm
@@ -239,6 +251,52 @@ contract MinimalVault {
             token.safeTransfer(msg.sender, withdrawn);
         }
         return withdrawn;
+    }
+
+    /// @notice Approve `spender` to move up to `value` of the caller's shares.
+    /// @dev Overwrites any existing allowance (the standard ERC-20 `approve` semantics,
+    /// including its known front-running caveat, which this vault does not attempt to fix).
+    function approve(address spender, uint256 value) external returns (bool) {
+        allowance[msg.sender][spender] = value;
+        emit Approval(msg.sender, spender, value);
+        return true;
+    }
+
+    /// @notice Move `value` of the caller's shares to `to`.
+    /// @dev Pure ledger update: no strategy interaction, so no reentrancy exposure and no
+    /// `nonReentrant` guard is needed. Rejects transfers to the zero address.
+    function transfer(address to, uint256 value) external returns (bool) {
+        require(to != address(0), "MinimalVault: transfer to zero address");
+        uint256 fromBalance = balanceOf[msg.sender];
+        require(fromBalance >= value, "MinimalVault: transfer exceeds balance");
+        unchecked {
+            balanceOf[msg.sender] = fromBalance - value;
+        }
+        balanceOf[to] += value;
+        emit Transfer(msg.sender, to, value);
+        return true;
+    }
+
+    /// @notice Move `value` of `from`'s shares to `to`, spending `msg.sender`'s allowance.
+    /// @dev A `type(uint256).max` allowance is treated as infinite and left unchanged, matching
+    /// the common ERC-20 convention.
+    function transferFrom(address from, address to, uint256 value) external returns (bool) {
+        require(to != address(0), "MinimalVault: transfer to zero address");
+        uint256 currentAllowance = allowance[from][msg.sender];
+        if (currentAllowance != type(uint256).max) {
+            require(currentAllowance >= value, "MinimalVault: insufficient allowance");
+            unchecked {
+                allowance[from][msg.sender] = currentAllowance - value;
+            }
+        }
+        uint256 fromBalance = balanceOf[from];
+        require(fromBalance >= value, "MinimalVault: transfer exceeds balance");
+        unchecked {
+            balanceOf[from] = fromBalance - value;
+        }
+        balanceOf[to] += value;
+        emit Transfer(from, to, value);
+        return true;
     }
 
     /// @notice Forwarded view of the strategy's totalAssets().
