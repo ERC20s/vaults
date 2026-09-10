@@ -2,12 +2,41 @@
 pragma solidity ^0.8.19;
 
 import {MockERC20} from "./mocks/MockERC20.sol";
+import {MockNonStandardERC20} from "./mocks/MockNonStandardERC20.sol";
 import {MockStrategy} from "./mocks/MockStrategy.sol";
 import {MockPartialPullStrategy} from "./mocks/MockPartialPullStrategy.sol";
 import {MockReentrantStrategy, ReentrantDepositor, IVaultLike} from "./mocks/MockReentrantStrategy.sol";
 import {MinimalVault} from "../src/vault/MinimalVault.sol";
 import {IStrategy} from "../src/interfaces/IStrategy.sol";
 import {IERC20} from "../src/utils/SafeERC20.sol";
+
+/// @notice Bare-bones IStrategy stub used ONLY to construct a MinimalVault around a token
+/// whose concrete type the existing strategy fixtures (MockStrategy, MockPartialPullStrategy)
+/// do not accept — they are typed to `MockERC20`. It is never deposited into or withdrawn
+/// from in the tests that use it; only the constructor and `decimals()` are exercised.
+contract NullStrategy is IStrategy {
+    function totalAssets() external pure returns (uint256) {
+        return 0;
+    }
+
+    function maxWithdraw() external pure returns (uint256) {
+        return 0;
+    }
+
+    function deposit(uint256) external pure {
+        revert("NullStrategy: unused");
+    }
+
+    function withdraw(uint256) external pure returns (uint256) {
+        revert("NullStrategy: unused");
+    }
+
+    function harvest() external pure returns (uint256) {
+        return 0;
+    }
+
+    function panic() external pure {}
+}
 
 contract MinimalVaultTest {
     MockERC20 token;
@@ -626,5 +655,25 @@ contract MinimalVaultTest {
         uint256 pulled = v.withdraw(10e18);
         require(pulled == 10e18, "withdraw blocked after a reverted re-entrant call");
         require(token.balanceOf(address(v)) == 0, "tokens stranded in the vault");
+    }
+
+    // --- decimals() matches the underlying asset ---
+
+    /// @notice A vault built on the standard 18-decimal MockERC20 (from `setUp`) still
+    /// reports 18, confirming the constructor's staticcall path resolves the common case.
+    function test_DecimalsMatchesStandardEighteenDecimalAsset() public {
+        require(vault.decimals() == 18, "decimals should match 18-decimal asset");
+    }
+
+    /// @notice A vault built on a 6-decimal asset (USDC-style) reports 6, not a hardcoded 18.
+    /// @dev Before this fix `decimals` was `constant 18` regardless of the asset, which made a
+    /// 1e6-raw-unit balance (one full unit of a 6-decimal token, minted 1:1 as shares at
+    /// bootstrap) render as 0.000000000001 in any wallet or explorer that trusts decimals().
+    function test_DecimalsMatchesNonStandardSixDecimalAsset() public {
+        MockNonStandardERC20 nstd = new MockNonStandardERC20();
+        NullStrategy nstdStrategy = new NullStrategy();
+        MinimalVault nstdVault = new MinimalVault(IERC20(address(nstd)), IStrategy(address(nstdStrategy)));
+
+        require(nstdVault.decimals() == 6, "decimals should match 6-decimal asset");
     }
 }
