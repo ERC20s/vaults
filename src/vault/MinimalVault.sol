@@ -77,6 +77,8 @@ contract MinimalVault {
     }
 
     constructor(IERC20 token_, IStrategy strategy_) {
+        require(address(token_) != address(0), "MinimalVault: zero-token");
+        require(address(strategy_) != address(0), "MinimalVault: zero-strategy");
         token = token_;
         strategy = strategy_;
         decimals = _readDecimals(token_);
