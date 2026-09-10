@@ -16,6 +16,8 @@ built against. All amounts are denominated in the underlying token, never in vau
 - `harvest() returns (harvested)` - realises gains; the assets stay in the strategy.
 - `panic()` - emergency unwind; the recovered assets stay in the strategy and leave via `withdraw()`.
 
+- MinimalVault exposes convenience wrappers `harvest()` and `panic()` that forward to the configured strategy. These wrappers are single-entry (nonReentrant) convenience entry points so callers that only know the vault address can trigger a harvest or emergency unwind without calling the strategy contract directly. See `src/vault/MinimalVault.sol` for the exact signatures and reentrancy behaviour.
+
 ### Custody rule
 
 One rule, in both directions:
