@@ -313,7 +313,10 @@ contract MinimalVault {
         if (currentAllowance != type(uint256).max) {
             require(currentAllowance >= value, "MinimalVault: insufficient allowance");
             unchecked {
-                allowance[from][msg.sender] = currentAllowance - value;
+                uint256 newAllowance = currentAllowance - value;
+                allowance[from][msg.sender] = newAllowance;
+                // Emit Approval so off-chain indexers and wallets observe the allowance change
+                emit Approval(from, msg.sender, newAllowance);
             }
         }
         uint256 fromBalance = balanceOf[from];
