@@ -331,6 +331,12 @@ contract MinimalVault {
         return strategy.totalAssets();
     }
 
+    /// @notice ERC-4626 asset() view: the underlying token address.
+    /// @dev Additive, read-only: returns the vault's configured asset token.
+    function asset() external view returns (address) {
+        return address(token);
+    }
+
     /// @notice Forwarded view of the strategy's maxWithdraw().
     function maxWithdraw() external view returns (uint256) {
         return strategy.maxWithdraw();
