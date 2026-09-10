@@ -27,7 +27,13 @@ contract MinimalVault {
     /// informational: nothing in the vault's accounting reads these.
     string public constant name = "MinimalVault Share";
     string public constant symbol = "mVLT";
-    uint8 public constant decimals = 18;
+
+    /// @notice Matches the underlying asset's own `decimals()` so a share's displayed
+    /// magnitude always tracks the raw units it is minted 1:1 against at bootstrap (see
+    /// `_convertToShares`). Falls back to 18 when the asset does not expose `decimals()`,
+    /// or exposes it in a way that cannot be read as a `uint8` - the same defensive
+    /// convention used by OpenZeppelin's and Solmate's ERC-4626 wrappers.
+    uint8 public immutable decimals;
 
     uint256 private constant _NOT_ENTERED = 1;
     uint256 private constant _ENTERED = 2;
@@ -73,6 +79,25 @@ contract MinimalVault {
     constructor(IERC20 token_, IStrategy strategy_) {
         token = token_;
         strategy = strategy_;
+        decimals = _readDecimals(token_);
+    }
+
+    /// @dev Reads `decimals()` off the underlying asset through a bounded staticcall, since
+    /// `IERC20` (declared in `src/utils/SafeERC20.sol`) does not include it and not every
+    /// ERC-20 implements it. Falls back to 18 when the call reverts, runs out of gas, or
+    /// returns data that is not a single, cleanly-encoded `uint8` - so a hostile or
+    /// non-conforming token can never make construction fail or return a garbage value.
+    function _readDecimals(IERC20 token_) private view returns (uint8) {
+        (bool ok, bytes memory data) = address(token_).staticcall(
+            abi.encodeWithSignature("decimals()")
+        );
+        if (ok && data.length == 32) {
+            uint256 value = abi.decode(data, (uint256));
+            if (value <= type(uint8).max) {
+                return uint8(value);
+            }
+        }
+        return 18;
     }
 
     /// @notice Deposit `amount` underlying and receive shares.
