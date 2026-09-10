@@ -410,6 +410,18 @@ contract MinimalVault {
         return _convertToAssets(shares, strategy.totalAssets());
     }
 
+    /// @notice Convenience wrapper: forward a harvest call to the strategy and return the harvested amount.
+    /// @dev Marked nonReentrant to avoid nested state-moving vault calls during strategy harvest.
+    function harvest() external nonReentrant returns (uint256) {
+        return strategy.harvest();
+    }
+
+    /// @notice Convenience wrapper: forward an emergency panic call to the strategy.
+    /// @dev Marked nonReentrant to avoid nested state-moving vault calls during strategy panic.
+    function panic() external nonReentrant {
+        strategy.panic();
+    }
+
     // --- Internals ---
 
     /// @dev Asserts the strategy took custody of everything the vault just pulled in, and
