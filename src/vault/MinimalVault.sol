@@ -444,14 +444,20 @@ contract MinimalVault {
 
     /// @notice Convenience wrapper: forward a harvest call to the strategy and return the harvested amount.
     /// @dev Marked nonReentrant to avoid nested state-moving vault calls during strategy harvest.
+    event Harvest(address indexed caller, uint256 harvested);
+    event Panic(address indexed caller);
+
     function harvest() external nonReentrant returns (uint256) {
-        return strategy.harvest();
+        uint256 harvested = strategy.harvest();
+        emit Harvest(msg.sender, harvested);
+        return harvested;
     }
 
     /// @notice Convenience wrapper: forward an emergency panic call to the strategy.
     /// @dev Marked nonReentrant to avoid nested state-moving vault calls during strategy panic.
     function panic() external nonReentrant {
         strategy.panic();
+        emit Panic(msg.sender);
     }
 
     // --- Internals ---
