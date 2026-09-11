@@ -44,6 +44,12 @@ contract MinimalVault {
     event Transfer(address indexed from, address indexed to, uint256 value);
     event Approval(address indexed owner, address indexed spender, uint256 value);
 
+    /// @notice Observational events emitted by the vault when callers ask the strategy to
+    /// realise gains or unwind in an emergency. They are purely informational and do not
+    /// alter custody or accounting beyond recording who asked for the action.
+    event Harvest(address indexed caller, uint256 harvested);
+    event Panic(address indexed caller);
+
     /// @dev Single-entry flag for the state-changing entry points. Starts (and returns) at
     /// `_NOT_ENTERED`, so the slot is warm and every call after the first pays only a warm
     /// SSTORE for the guard.
@@ -445,13 +451,16 @@ contract MinimalVault {
     /// @notice Convenience wrapper: forward a harvest call to the strategy and return the harvested amount.
     /// @dev Marked nonReentrant to avoid nested state-moving vault calls during strategy harvest.
     function harvest() external nonReentrant returns (uint256) {
-        return strategy.harvest();
+        uint256 harvested = strategy.harvest();
+        emit Harvest(msg.sender, harvested);
+        return harvested;
     }
 
     /// @notice Convenience wrapper: forward an emergency panic call to the strategy.
     /// @dev Marked nonReentrant to avoid nested state-moving vault calls during strategy panic.
     function panic() external nonReentrant {
         strategy.panic();
+        emit Panic(msg.sender);
     }
 
     // --- Internals ---
