@@ -38,11 +38,19 @@ contract MinimalVault {
     uint256 private constant _NOT_ENTERED = 1;
     uint256 private constant _ENTERED = 2;
 
-    /// @dev Standard ERC-4626 Deposit and Withdraw events, plus ERC20 Transfer/Approval for shares.
+    /// @dev Standard ERC-4626 Deposit and Withdraw events, plus ERC20 Transfer/Approval for shares,
+    /// and vault-level observability for strategy lifecycle actions.
     event Deposit(address indexed caller, address indexed owner, uint256 assets, uint256 shares);
     event Withdraw(address indexed caller, address indexed receiver, uint256 assets, uint256 shares);
     event Transfer(address indexed from, address indexed to, uint256 value);
     event Approval(address indexed owner, address indexed spender, uint256 value);
+
+    /// @notice Emitted when the vault wrapper realises gains by calling strategy.harvest().
+    /// `harvested` is the amount the strategy reports as newly realised and kept in strategy custody.
+    event Harvest(address indexed caller, uint256 harvested);
+
+    /// @notice Emitted when the vault wrapper triggers an emergency panic on the strategy.
+    event Panic(address indexed caller);
 
     /// @dev Single-entry flag for the state-changing entry points. Starts (and returns) at
     /// `_NOT_ENTERED`, so the slot is warm and every call after the first pays only a warm
@@ -445,13 +453,16 @@ contract MinimalVault {
     /// @notice Convenience wrapper: forward a harvest call to the strategy and return the harvested amount.
     /// @dev Marked nonReentrant to avoid nested state-moving vault calls during strategy harvest.
     function harvest() external nonReentrant returns (uint256) {
-        return strategy.harvest();
+        uint256 harvested = strategy.harvest();
+        emit Harvest(msg.sender, harvested);
+        return harvested;
     }
 
     /// @notice Convenience wrapper: forward an emergency panic call to the strategy.
     /// @dev Marked nonReentrant to avoid nested state-moving vault calls during strategy panic.
     function panic() external nonReentrant {
         strategy.panic();
+        emit Panic(msg.sender);
     }
 
     // --- Internals ---
