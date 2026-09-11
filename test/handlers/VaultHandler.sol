@@ -311,7 +311,7 @@ contract VaultHandler {
         harvestCalls++;
         (uint256 assetsBefore, uint256 supplyBefore) = _snapshot();
 
-        try strategy.harvest() returns (uint256 gain) {
+        try vault.harvest() returns (uint256 gain) {
             harvested += gain;
             _check(strategy.totalAssets() == assetsBefore, "harvest() moved assets out of custody");
             _check(vault.totalSupply() == supplyBefore, "harvest() changed the vault's share supply");
