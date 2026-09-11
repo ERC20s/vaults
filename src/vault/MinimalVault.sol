@@ -3,13 +3,14 @@ pragma solidity ^0.8.19;
 
 import {IStrategy} from "../interfaces/IStrategy.sol";
 import {SafeERC20, IERC20} from "../utils/SafeERC20.sol";
+import {IERC4626} from "../interfaces/IERC4626.sol";
 
 /// @title MinimalVault
 /// @notice A small, auditable example vault that demonstrates an ERC-4626-like surface
 /// and the exact custody boundary with an IStrategy. It is intentionally minimal: no
 /// ownership, fees or pausing. The four state-changing entry points are single-entry
 /// (`nonReentrant`); the views are not. Uses SafeERC20 for token ops.
-contract MinimalVault {
+contract MinimalVault is IERC4626 {
     using SafeERC20 for IERC20;
 
     IERC20 public immutable token;
