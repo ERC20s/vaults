@@ -289,6 +289,27 @@ contract MinimalVault {
         return true;
     }
 
+    /// @notice Increase the caller's allowance for `spender` by `addedValue`.
+    /// @dev Convenience helper matching common ERC-20 patterns. Emits Approval(owner, spender, newValue).
+    function increaseAllowance(address spender, uint256 addedValue) external returns (bool) {
+        allowance[msg.sender][spender] = allowance[msg.sender][spender] + addedValue;
+        emit Approval(msg.sender, spender, allowance[msg.sender][spender]);
+        return true;
+    }
+
+    /// @notice Decrease the caller's allowance for `spender` by `subtractedValue`.
+    /// @dev Reverts when the subtraction would underflow. Emits Approval(owner, spender, newValue).
+    function decreaseAllowance(address spender, uint256 subtractedValue) external returns (bool) {
+        uint256 current = allowance[msg.sender][spender];
+        require(current >= subtractedValue, "MinimalVault: decreased allowance below zero");
+        unchecked {
+            uint256 newAllowance = current - subtractedValue;
+            allowance[msg.sender][spender] = newAllowance;
+            emit Approval(msg.sender, spender, newAllowance);
+        }
+        return true;
+    }
+
     /// @notice Move `value` of the caller's shares to `to`.
     /// @dev Pure ledger update: no strategy interaction, so no reentrancy exposure and no
     /// `nonReentrant` guard is needed. Rejects transfers to the zero address.
