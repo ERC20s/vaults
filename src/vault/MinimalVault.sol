@@ -201,7 +201,7 @@ contract MinimalVault {
         require(got == withdrawn, "MinimalVault: strategy returned mismatch");
 
         // Burn shares proportional to withdrawn amount (ceil)
-        uint256 sharesToBurn = (withdrawn * totalSupply + totalAssetsBefore - 1) / totalAssetsBefore;
+        uint256 sharesToBurn = _mulDivCeil(withdrawn, totalSupply, totalAssetsBefore);
         require(balanceOf[msg.sender] >= sharesToBurn, "insufficient shares");
         balanceOf[msg.sender] -= sharesToBurn;
         totalSupply -= sharesToBurn;
@@ -261,7 +261,7 @@ contract MinimalVault {
             sharesToBurn = shares;
         } else {
             // Shortfall: burn only what the payout covers, rounded up.
-            sharesToBurn = (withdrawn * totalSupplyBefore + totalAssetsBefore - 1) / totalAssetsBefore;
+            sharesToBurn = _mulDivCeil(withdrawn, totalSupplyBefore, totalAssetsBefore);
             // withdrawn < floor(shares * totalAssets / totalSupply) makes this strictly
             // smaller than `shares`; the old cap is an assertion now, not a discount.
             require(sharesToBurn <= shares, "MinimalVault: burn exceeds shares offered");
@@ -386,7 +386,7 @@ contract MinimalVault {
         uint256 strategyCap = strategy.maxWithdraw();
         uint256 cap = ownerClaim <= strategyCap ? ownerClaim : strategyCap;
         // Solve for shares: floor(shares * totalAssetsBefore / totalSupply) <= cap
-        uint256 shares = (cap * totalSupply) / totalAssetsBefore;
+        uint256 shares = _mulDivFloor(cap, totalSupply, totalAssetsBefore);
         if (shares > balanceOf[owner]) return balanceOf[owner];
         return shares;
     }
@@ -424,7 +424,7 @@ contract MinimalVault {
     function previewWithdraw(uint256 assets) external view returns (uint256) {
         uint256 totalAssetsBefore = strategy.totalAssets();
         if (totalSupply == 0 || totalAssetsBefore == 0) return 0;
-        return (assets * totalSupply + totalAssetsBefore - 1) / totalAssetsBefore;
+        return _mulDivCeil(assets, totalSupply, totalAssetsBefore);
     }
 
     /// @notice Preview how many assets redeeming `shares` would return (floor).
@@ -486,7 +486,7 @@ contract MinimalVault {
             // Shares outstanding, nothing behind them: no price, and no division by zero.
             return 0;
         }
-        return (amount * totalSupply) / totalAssetsBefore; // floor => conservative
+        return _mulDivFloor(amount, totalSupply, totalAssetsBefore); // floor => conservative
     }
 
     /// @dev With shares outstanding and no assets this returns 0 - shares backed by
@@ -495,7 +495,7 @@ contract MinimalVault {
         if (totalSupply == 0) {
             return shares;
         }
-        return (shares * totalAssetsBefore) / totalSupply; // floor
+        return _mulDivFloor(shares, totalAssetsBefore, totalSupply); // floor
     }
 
     function _convertToAssetsForMint(uint256 shares, uint256 totalAssetsBefore) internal view returns (uint256) {
@@ -504,7 +504,59 @@ contract MinimalVault {
             return shares;
         }
         // Ceil so we collect enough assets to back the minted shares.
-        return (shares * totalAssetsBefore + totalSupply - 1) / totalSupply;
+        return _mulDivCeil(shares, totalAssetsBefore, totalSupply);
+    }
+
+    function _mulDivFloor(uint256 x, uint256 y, uint256 denominator) internal pure returns (uint256 result) {
+        unchecked {
+            uint256 prod0;
+            uint256 prod1;
+            assembly {
+                let mm := mulmod(x, y, not(0))
+                prod0 := mul(x, y)
+                prod1 := sub(sub(mm, prod0), lt(mm, prod0))
+            }
+            if (prod1 == 0) {
+                return prod0 / denominator;
+            }
+            require(denominator > prod1, "MinimalVault: mulDiv overflow");
+
+            uint256 remainder;
+            assembly { remainder := mulmod(x, y, denominator) }
+            assembly {
+                prod1 := sub(prod1, gt(remainder, prod0))
+                prod0 := sub(prod0, remainder)
+            }
+
+            uint256 twos = denominator & (~denominator + 1);
+            assembly {
+                denominator := div(denominator, twos)
+                prod0 := div(prod0, twos)
+                twos := add(div(sub(0, twos), twos), 1)
+            }
+
+            prod0 |= prod1 * twos;
+
+            // Invert denominator mod 2^256
+            uint256 inv = (3 * denominator) ^ 2;
+            inv *= 2 - denominator * inv; // inverse mod 2^8
+            inv *= 2 - denominator * inv; // mod 2^16
+            inv *= 2 - denominator * inv; // mod 2^32
+            inv *= 2 - denominator * inv; // mod 2^64
+            inv *= 2 - denominator * inv; // mod 2^128
+            inv *= 2 - denominator * inv; // mod 2^256
+
+            result = prod0 * inv;
+            return result;
+        }
+    }
+
+    function _mulDivCeil(uint256 x, uint256 y, uint256 denominator) internal pure returns (uint256) {
+        uint256 floor = _mulDivFloor(x, y, denominator);
+        if (mulmod(x, y, denominator) == 0) return floor;
+        unchecked {
+            return floor + 1;
+        }
     }
 
     function tokenBalanceOf(address who) internal view returns (uint256) {
