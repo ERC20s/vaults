@@ -252,7 +252,7 @@ contract MinimalVault is IERC4626 {
         require(totalSupplyBefore > 0 && totalAssetsBefore > 0, "no-liquidity");
 
         // FLOOR: never ask the strategy for more than the shares are worth.
-        uint256 assetsRequested = (shares * totalAssetsBefore) / totalSupplyBefore;
+        uint256 assetsRequested = _mulDivFloor(shares, totalAssetsBefore, totalSupplyBefore);
         require(assetsRequested > 0, "MinimalVault: zero-assets");
 
         uint256 before = tokenBalanceOf(address(this));
