@@ -50,6 +50,12 @@ contract MockReentrantStrategy is IStrategy {
     /// @notice Fire the callback from inside `deposit()`, after the pull.
     bool public reenterOnDeposit;
 
+    /// @notice Fire the callback from inside `harvest()`, after computing harvested.
+    bool public reenterOnHarvest;
+
+    /// @notice Fire the callback from inside `panic()`.
+    bool public reenterOnPanic;
+
     /// @notice Set once the callback has fired, so a re-entrant fixture can never loop.
     bool public fired;
 
@@ -73,6 +79,18 @@ contract MockReentrantStrategy is IStrategy {
 
     function armDeposit(bool on) external {
         reenterOnDeposit = on;
+        fired = false;
+    }
+
+    /// @notice Arm the strategy to call back during harvest(). One-shot.
+    function armHarvest(bool on) external {
+        reenterOnHarvest = on;
+        fired = false;
+    }
+
+    /// @notice Arm the strategy to call back during panic(). One-shot.
+    function armPanic(bool on) external {
+        reenterOnPanic = on;
         fired = false;
     }
 
@@ -118,10 +136,13 @@ contract MockReentrantStrategy is IStrategy {
         uint256 total = totalAssets();
         harvested = total > principal ? total - principal : 0;
         principal = total > principal ? total : principal;
+        _maybeReenter(reenterOnHarvest);
     }
 
     /// @inheritdoc IStrategy
-    function panic() external override {}
+    function panic() external override {
+        _maybeReenter(reenterOnPanic);
+    }
 
     /// @dev Fires the callback at most once. A revert inside the hook - which is what the
     /// vault's guard produces - bubbles up and reverts the vault's outer call whole, which is
