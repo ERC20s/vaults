@@ -25,6 +25,14 @@ contract MinimalVault is IERC4626 {
     /// common infinite-approval convention.
     mapping(address => mapping(address => uint256)) public allowance;
 
+    /// @dev EIP-2612-style permit state for gasless approvals of vault shares.
+    /// nonces[owner] increments for every successful permit to prevent signature replay.
+    mapping(address => uint256) public nonces;
+
+    /// @dev EIP-712 domain separator and permit typehash for constructing the signed digest.
+    bytes32 public immutable DOMAIN_SEPARATOR;
+    bytes32 public constant PERMIT_TYPEHASH = keccak256("Permit(address owner,address spender,uint256 value,uint256 nonce,uint256 deadline)");
+
     /// @notice Cosmetic ERC-20 metadata so wallets and tooling show a sensible label. Purely
     /// informational: nothing in the vault's accounting reads these.
     string public constant name = "MinimalVault Share";
@@ -90,6 +98,19 @@ contract MinimalVault is IERC4626 {
         token = token_;
         strategy = strategy_;
         decimals = _readDecimals(token_);
+
+        // EIP-712 domain separator as per EIP-2612: name, version "1", chainId and address.
+        uint256 chainId;
+        assembly { chainId := chainid() }
+        DOMAIN_SEPARATOR = keccak256(
+            abi.encode(
+                keccak256("EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)"),
+                keccak256(bytes(name)),
+                keccak256(bytes("1")),
+                chainId,
+                address(this)
+            )
+        );
     }
 
     /// @dev Reads `decimals()` off the underlying asset through a bounded staticcall, since
@@ -374,6 +395,38 @@ contract MinimalVault is IERC4626 {
         allowance[msg.sender][spender] = value;
         emit Approval(msg.sender, spender, value);
         return true;
+    }
+
+    /// @notice EIP-2612 style permit for gasless approvals of vault shares.
+    /// @dev Verifies an EIP-712 signature and sets allowance[owner][spender] = value.
+    function permit(
+        address owner,
+        address spender,
+        uint256 value,
+        uint256 deadline,
+        uint8 v,
+        bytes32 r,
+        bytes32 s
+    ) external {
+        require(block.timestamp <= deadline, "MinimalVault: permit expired");
+
+        uint256 ownerNonce = nonces[owner];
+        bytes32 digest = keccak256(
+            abi.encodePacked(
+                "\x19\x01",
+                DOMAIN_SEPARATOR,
+                keccak256(abi.encode(PERMIT_TYPEHASH, owner, spender, value, ownerNonce, deadline))
+            )
+        );
+
+        address recovered = ecrecover(digest, v, r, s);
+        require(recovered != address(0) && recovered == owner, "MinimalVault: invalid permit");
+
+        // consume the nonce
+        nonces[owner] = ownerNonce + 1;
+
+        allowance[owner][spender] = value;
+        emit Approval(owner, spender, value);
     }
 
     /// @notice Increase the caller's allowance for `spender` by `addedValue`.
