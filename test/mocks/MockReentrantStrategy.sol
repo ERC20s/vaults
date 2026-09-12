@@ -50,8 +50,17 @@ contract MockReentrantStrategy is IStrategy {
     /// @notice Fire the callback from inside `deposit()`, after the pull.
     bool public reenterOnDeposit;
 
+    /// @notice Fire the callback from inside `harvest()`, while the vault is mid-harvest.
+    bool public reenterOnHarvest;
+
+    /// @notice Fire the callback from inside `panic()`, while the vault is mid-panic.
+    bool public reenterOnPanic;
+
     /// @notice Set once the callback has fired, so a re-entrant fixture can never loop.
     bool public fired;
+
+    /// @notice Portion of the position that is NOT redeemable this block (locked, in an epoch, ...).
+    uint256 public illiquid;
 
     /// @notice Assets pulled in through deposit() and not yet withdrawn.
     uint256 public principal;
@@ -76,6 +85,21 @@ contract MockReentrantStrategy is IStrategy {
         fired = false;
     }
 
+    function armHarvest(bool on) external {
+        reenterOnHarvest = on;
+        fired = false;
+    }
+
+    function armPanic(bool on) external {
+        reenterOnPanic = on;
+        fired = false;
+    }
+
+    /// @notice Test hook: sets how much of the position is locked this block.
+    function setIlliquid(uint256 amount) external {
+        illiquid = amount;
+    }
+
     // --- IStrategy ---
 
     /// @inheritdoc IStrategy
@@ -85,7 +109,8 @@ contract MockReentrantStrategy is IStrategy {
 
     /// @inheritdoc IStrategy
     function maxWithdraw() public view override returns (uint256 maxAssets) {
-        maxAssets = totalAssets();
+        uint256 total = totalAssets();
+        maxAssets = illiquid >= total ? 0 : total - illiquid;
     }
 
     /// @inheritdoc IStrategy
@@ -118,10 +143,15 @@ contract MockReentrantStrategy is IStrategy {
         uint256 total = totalAssets();
         harvested = total > principal ? total - principal : 0;
         principal = total > principal ? total : principal;
+        _maybeReenter(reenterOnHarvest);
     }
 
     /// @inheritdoc IStrategy
-    function panic() external override {}
+    function panic() external override {
+        // Make everything withdrawable and then (optionally) open the reentrancy window.
+        illiquid = 0;
+        _maybeReenter(reenterOnPanic);
+    }
 
     /// @dev Fires the callback at most once. A revert inside the hook - which is what the
     /// vault's guard produces - bubbles up and reverts the vault's outer call whole, which is
@@ -134,6 +164,7 @@ contract MockReentrantStrategy is IStrategy {
         IReentrancyHook(hook).onReentrancyWindow();
     }
 }
+
 
 /// @title ReentrantDepositor
 /// @notice The attacker helper `MockReentrantStrategy` calls back into.
