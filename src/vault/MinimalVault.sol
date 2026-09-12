@@ -370,8 +370,13 @@ contract MinimalVault is IERC4626 {
     }
 
     /// @notice Forwarded view of the strategy's maxWithdraw().
+    /// @dev Defensive: cap what the strategy reports to the strategy.totalAssets() value so
+    ///      frontends do not see an advertised liquidity larger than the strategy actually holds.
     function maxWithdraw() external view returns (uint256) {
-        return strategy.maxWithdraw();
+        uint256 totalAssetsBefore = strategy.totalAssets();
+        uint256 strategyCap = strategy.maxWithdraw();
+        if (strategyCap > totalAssetsBefore) strategyCap = totalAssetsBefore;
+        return strategyCap;
     }
 
     /// @notice Forwarded per-owner max withdraw: the lesser of the owner's floor-priced claim
@@ -382,6 +387,7 @@ contract MinimalVault is IERC4626 {
         if (totalSupply > 0 && totalAssetsBefore == 0) return 0;
         uint256 ownerClaim = _convertToAssets(balanceOf[owner], totalAssetsBefore);
         uint256 strategyCap = strategy.maxWithdraw();
+        if (strategyCap > totalAssetsBefore) strategyCap = totalAssetsBefore;
         return ownerClaim <= strategyCap ? ownerClaim : strategyCap;
     }
 
@@ -392,6 +398,7 @@ contract MinimalVault is IERC4626 {
         if (totalSupply == 0 || totalAssetsBefore == 0) return 0;
         uint256 ownerClaim = _convertToAssets(balanceOf[owner], totalAssetsBefore);
         uint256 strategyCap = strategy.maxWithdraw();
+        if (strategyCap > totalAssetsBefore) strategyCap = totalAssetsBefore;
         uint256 cap = ownerClaim <= strategyCap ? ownerClaim : strategyCap;
         // Solve for shares: floor(shares * totalAssetsBefore / totalSupply) <= cap
         uint256 shares = _mulDivFloor(cap, totalSupply, totalAssetsBefore);
