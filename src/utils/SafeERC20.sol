@@ -47,7 +47,17 @@ library SafeERC20 {
 
     function _callOptionalReturn(IERC20 token, bytes memory data) private {
         (bool success, bytes memory returndata) = address(token).call(data);
-        require(success, "SafeERC20: low-level call failed");
+        if (!success) {
+            // If there is revert data, bubble it up to provide the original reason.
+            if (returndata.length > 0) {
+                assembly {
+                    let returndata_size := mload(returndata)
+                    revert(add(returndata, 32), returndata_size)
+                }
+            }
+            // Otherwise revert with the generic message as before.
+            revert("SafeERC20: low-level call failed");
+        }
         if (returndata.length > 0) {
             // Return data is optional
             require(abi.decode(returndata, (bool)), "SafeERC20: ERC20 operation did not succeed");
