@@ -206,6 +206,7 @@ contract MinimalVault is IERC4626 {
         uint256 balanceAfter = tokenBalanceOf(address(this));
         withdrawn = balanceAfter - before;
         require(got == withdrawn, "MinimalVault: strategy returned mismatch");
+        require(withdrawn <= assets, "MinimalVault: strategy overpaid");
 
         // Burn shares proportional to withdrawn amount (ceil)
         uint256 sharesToBurn = _mulDivCeil(withdrawn, totalSupply, totalAssetsBefore);
