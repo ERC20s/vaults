@@ -4,6 +4,7 @@ pragma solidity ^0.8.19;
 import {IStrategy} from "../interfaces/IStrategy.sol";
 import {SafeERC20, IERC20} from "../utils/SafeERC20.sol";
 import {IERC4626} from "../interfaces/IERC4626.sol";
+import {IERC20Permit} from "../interfaces/IERC20Permit.sol";
 
 /// @title MinimalVault
 /// @notice A small, auditable example vault that demonstrates an ERC-4626-like surface
@@ -160,6 +161,47 @@ contract MinimalVault is IERC4626 {
         return shares;
     }
 
+    /// @notice Deposit `amount` using EIP-2612 permit (owner signs an approval off-chain).
+    /// @dev Calls permit on the asset then follows the same guarded path as deposit().
+    function depositWithPermit(
+        uint256 amount,
+        uint256 deadline,
+        uint8 v,
+        bytes32 r,
+        bytes32 s
+    ) external nonReentrant returns (uint256 shares) {
+        require(amount > 0, "MinimalVault: zero-assets");
+
+        // Use permit to set allowance from msg.sender to this vault
+        IERC20Permit(address(token)).permit(msg.sender, address(this), amount, deadline, v, r, s);
+
+        uint256 totalAssetsBefore = strategy.totalAssets();
+        require(totalSupply == 0 || totalAssetsBefore > 0, "MinimalVault: no-price");
+
+        // Price the deposit against pre-deposit state, before any token moves.
+        shares = _convertToShares(amount, totalAssetsBefore);
+        require(shares > 0, "MinimalVault: zero-shares");
+
+        // Pull tokens from caller into the vault
+        uint256 vaultBefore = tokenBalanceOf(address(this));
+        token.safeTransferFrom(msg.sender, address(this), amount);
+
+        // Approve strategy for exactly amount and let it pull
+        token.safeApprove(address(strategy), amount);
+        strategy.deposit(amount);
+        _assertStrategyPulled(vaultBefore);
+
+        // Mint shares
+        totalSupply += shares;
+        balanceOf[msg.sender] += shares;
+
+        // Emit standard ERC-4626 Deposit and ERC20 Transfer (mint) logs
+        emit Deposit(msg.sender, msg.sender, amount, shares);
+        emit Transfer(address(0), msg.sender, shares);
+
+        return shares;
+    }
+
     /// @notice Mint `shares` by supplying the required underlying.
     /// @dev Computes required assets, pulls them, approves the strategy and deposits.
     /// Mirrors the guards in `deposit()`: the vault must be able to price the mint, no
@@ -173,6 +215,43 @@ contract MinimalVault is IERC4626 {
 
         assets = _convertToAssetsForMint(shares, totalAssetsBefore);
         require(assets > 0, "MinimalVault: zero-assets");
+
+        uint256 vaultBefore = tokenBalanceOf(address(this));
+        token.safeTransferFrom(msg.sender, address(this), assets);
+        token.safeApprove(address(strategy), assets);
+        strategy.deposit(assets);
+        _assertStrategyPulled(vaultBefore);
+
+        totalSupply += shares;
+        balanceOf[msg.sender] += shares;
+
+        // Emit standard ERC-4626 Deposit and ERC20 Transfer (mint) logs
+        emit Deposit(msg.sender, msg.sender, assets, shares);
+        emit Transfer(address(0), msg.sender, shares);
+
+        return assets;
+    }
+
+    /// @notice Mint `shares` using EIP-2612 permit (owner signs an approval off-chain).
+    /// @dev Calls permit on the asset then follows the same guarded path as mint().
+    function mintWithPermit(
+        uint256 shares,
+        uint256 deadline,
+        uint8 v,
+        bytes32 r,
+        bytes32 s
+    ) external nonReentrant returns (uint256 assets) {
+        require(shares > 0, "MinimalVault: zero-shares");
+
+        // Compute assets required before token moves
+        uint256 totalAssetsBefore = strategy.totalAssets();
+        require(totalSupply == 0 || totalAssetsBefore > 0, "MinimalVault: no-price");
+
+        assets = _convertToAssetsForMint(shares, totalAssetsBefore);
+        require(assets > 0, "MinimalVault: zero-assets");
+
+        // Use permit to set allowance from msg.sender to this vault
+        IERC20Permit(address(token)).permit(msg.sender, address(this), assets, deadline, v, r, s);
 
         uint256 vaultBefore = tokenBalanceOf(address(this));
         token.safeTransferFrom(msg.sender, address(this), assets);
