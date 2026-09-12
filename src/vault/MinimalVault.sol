@@ -442,6 +442,14 @@ contract MinimalVault is IERC4626 {
         return strategy.totalAssets();
     }
 
+    /// @notice Price per share, scaled to 1e18 for a fixed-decimal UI-friendly value.
+    /// @dev When the vault is empty (totalSupply == 0) we return 1e18 (bootstrap = 1).
+    /// Otherwise return floor(strategy.totalAssets() * 1e18 / totalSupply).
+    function pricePerShare() external view returns (uint256) {
+        if (totalSupply == 0) return 1e18;
+        return _mulDivFloor(strategy.totalAssets(), 1e18, totalSupply);
+    }
+
     /// @notice ERC-4626 asset() view: the underlying token address.
     /// @dev Additive, read-only: returns the vault's configured asset token.
     function asset() external view returns (address) {
