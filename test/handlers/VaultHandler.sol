@@ -48,6 +48,10 @@ contract VaultActor {
     function redeem(uint256 shares) external onlyOwner returns (uint256 withdrawn) {
         return vault.redeem(shares);
     }
+
+    function transfer(address to, uint256 shares) external onlyOwner returns (bool ok) {
+        return vault.transfer(to, shares);
+    }
 }
 
 /// @title VaultHandler
@@ -77,6 +81,14 @@ contract VaultActor {
 /// cannot read it. What it can prove is that the flag is always released - a sequence in which the
 /// vault stayed latched would show up as every later deposit, mint, withdraw and redeem reverting,
 /// and the ledger totals below would stop moving.
+///
+/// Prices are compared the way the vault quotes them, with one virtual share and one virtual asset:
+/// a share is worth `(totalAssets + 1) / (totalSupply + 1)`. Every per-call price check below and
+/// every mirror of a vault preview uses that pair, cross-multiplied, so there is no division and no
+/// dust tolerance. (`MinimalVault._convertToShares` explains why the pair exists.)
+///
+/// The handler is the vault's `guardian`, so `panic()` can be driven here; a non-guardian caller is
+/// refused by the vault and that refusal is covered by the single-shot suite.
 contract VaultHandler {
     /// @notice Upper bound for a single action, in underlying token units.
     /// @dev Large enough for realistic vault flows, small enough that a long sequence of deposits
@@ -105,6 +117,10 @@ contract VaultHandler {
     uint256 public harvested;
     /// @notice Every token this handler has ever minted, wherever it went.
     uint256 public mintedTotal;
+    /// @notice Shares the vault created through `deposit()` / `mint()`, as reported by the calls.
+    uint256 public sharesMinted;
+    /// @notice Shares the vault destroyed through `withdraw()` / `redeem()`, measured on balances.
+    uint256 public sharesBurned;
 
     // --- share-price snapshot ----------------------------------------------------------
 
@@ -127,11 +143,13 @@ contract VaultHandler {
     uint256 public harvestCalls;
     uint256 public setIlliquidCalls;
     uint256 public injectYieldCalls;
+    uint256 public panicCalls;
+    uint256 public transferCalls;
 
     constructor() {
         MockERC20 token_ = new MockERC20();
         MockStrategy strategy_ = new MockStrategy(token_);
-        MinimalVault vault_ = new MinimalVault(IERC20(address(token_)), IStrategy(address(strategy_)));
+        MinimalVault vault_ = new MinimalVault(IERC20(address(token_)), IStrategy(address(strategy_)), address(this));
 
         token = token_;
         strategy = strategy_;
@@ -168,7 +186,7 @@ contract VaultHandler {
             );
             if (supplyBefore > 0) {
                 _check(
-                    shares * assetsBefore <= amount * supplyBefore,
+                    shares * (assetsBefore + 1) <= amount * (supplyBefore + 1),
                     "deposit() minted more shares than the pre-deposit price allows"
                 );
             }
@@ -177,6 +195,7 @@ contract VaultHandler {
                 "deposit() left underlying stranded in the vault"
             );
             assetsIn += amount;
+            sharesMinted += shares;
         } catch {
             // A refusal is legitimate here (zero assets, "no-price", a share amount that rounds
             // down to zero under an inflated price). Nothing moved, so there is nothing to record.
@@ -221,12 +240,13 @@ contract VaultHandler {
             );
             if (supplyBefore > 0) {
                 _check(
-                    assets * supplyBefore >= shares * assetsBefore,
+                    assets * (supplyBefore + 1) >= shares * (assetsBefore + 1),
                     "mint() collected less than the shares it minted are worth"
                 );
             }
             _check(token.balanceOf(address(vault)) == 0, "mint() left underlying stranded in the vault");
             assetsIn += assets;
+            sharesMinted += shares;
         } catch {
             // Same as deposit(): refusing is a valid outcome.
         }
@@ -257,7 +277,7 @@ contract VaultHandler {
             _check(withdrawn == delta, "withdraw() return value is not the caller's balance delta");
             _check(withdrawn <= assets, "withdraw() paid out more than was requested");
             _check(
-                burned * assetsBefore >= withdrawn * supplyBefore,
+                burned * (assetsBefore + 1) >= withdrawn * (supplyBefore + 1),
                 "withdraw() burned fewer shares than the payout was worth"
             );
             _check(
@@ -265,6 +285,7 @@ contract VaultHandler {
                 "withdraw() left underlying stranded in the vault"
             );
             assetsOut += withdrawn;
+            sharesBurned += burned;
         } catch {
             // "no-liquidity" and a locked position are legitimate refusals.
         }
@@ -294,11 +315,12 @@ contract VaultHandler {
             // The floor-priced redeem merged in cycle 6: a redemption can never be paid more than
             // the shares it offers are worth at the pre-redeem price.
             _check(
-                withdrawn * supplyBefore <= shares * assetsBefore,
+                withdrawn * (supplyBefore + 1) <= shares * (assetsBefore + 1),
                 "redeem() paid out more than the burned shares were worth"
             );
             _check(token.balanceOf(address(vault)) == 0, "redeem() left underlying stranded in the vault");
             assetsOut += withdrawn;
+            sharesBurned += burned;
         } catch {
             // "no-liquidity" / a request that floors to zero assets are legitimate refusals.
         }
@@ -335,6 +357,52 @@ contract VaultHandler {
             "maxWithdraw() exceeded totalAssets() after the position was locked"
         );
         _checkSharePrice(assetsBefore, supplyBefore, "setIlliquid() lowered the price of a share");
+    }
+
+    /// @notice Emergency unwind, driven by the handler as the vault's guardian. It must move no
+    /// token, create no share and reopen the whole position.
+    function panic() external {
+        panicCalls++;
+        (uint256 assetsBefore, uint256 supplyBefore) = _snapshot();
+
+        try vault.panic() {
+            _check(strategy.totalAssets() == assetsBefore, "panic() moved assets out of custody");
+            _check(vault.totalSupply() == supplyBefore, "panic() changed the vault's share supply");
+            _check(strategy.maxWithdraw() == strategy.totalAssets(), "panic() did not reopen the position");
+        } catch {
+            _check(false, "panic() reverted for the guardian");
+        }
+
+        _checkSharePrice(assetsBefore, supplyBefore, "panic() lowered the price of a share");
+    }
+
+    /// @notice Moves shares between two modelled holders. A pure ledger move: the supply, the
+    /// price and the strategy's custody must all stay exactly where they were.
+    function transfer(uint256 fromSeed, uint256 toSeed, uint256 shares) external {
+        transferCalls++;
+        VaultActor from = _actor(fromSeed);
+        VaultActor to = _actor(toSeed);
+        (uint256 assetsBefore, uint256 supplyBefore) = _snapshot();
+
+        uint256 fromBefore = vault.balanceOf(address(from));
+        uint256 toBefore = vault.balanceOf(address(to));
+        shares = _bound(shares, 0, fromBefore);
+
+        try from.transfer(address(to), shares) returns (bool ok) {
+            _check(ok, "transfer() returned false");
+            if (address(from) == address(to)) {
+                _check(vault.balanceOf(address(from)) == fromBefore, "self-transfer changed a balance");
+            } else {
+                _check(vault.balanceOf(address(from)) == fromBefore - shares, "transfer() sender balance wrong");
+                _check(vault.balanceOf(address(to)) == toBefore + shares, "transfer() recipient balance wrong");
+            }
+            _check(vault.totalSupply() == supplyBefore, "transfer() changed the share supply");
+            _check(strategy.totalAssets() == assetsBefore, "transfer() moved assets");
+        } catch {
+            _check(false, "transfer() within balance reverted");
+        }
+
+        _checkSharePrice(assetsBefore, supplyBefore, "transfer() lowered the price of a share");
     }
 
     /// @notice Simulates an external yield source paying the strategy directly - the same model
@@ -393,19 +461,23 @@ contract VaultHandler {
         prevSupply = supplyBefore;
     }
 
-    /// @dev assets-per-share never falls, compared CROSS-MULTIPLIED so there is no division and no
-    /// dust tolerance: `assetsAfter / supplyAfter >= assetsBefore / supplyBefore`.
+    /// @dev assets-per-share never falls, compared CROSS-MULTIPLIED with the virtual pair the vault
+    /// prices with, so there is no division and no dust tolerance:
+    /// `(assetsAfter + 1) / (supplyAfter + 1) >= (assetsBefore + 1) / (supplyBefore + 1)`.
     /// Skipped when either side has no shares outstanding: an empty vault has no price at all, and
     /// the 1:1 bootstrap of the first deposit into a vault that already holds donated assets is a
     /// price change from nothing, not a fall.
     function _checkSharePrice(uint256 assetsBefore, uint256 supplyBefore, string memory reason) internal {
         uint256 supplyAfter = vault.totalSupply();
         if (supplyBefore == 0 || supplyAfter == 0) return;
-        _check(strategy.totalAssets() * supplyBefore >= assetsBefore * supplyAfter, reason);
+        _check(
+            (strategy.totalAssets() + 1) * (supplyBefore + 1) >= (assetsBefore + 1) * (supplyAfter + 1),
+            reason
+        );
     }
 
-    /// @dev Mirrors `MinimalVault._convertToAssetsForMint` (ceil), so the handler can pre-fund the
-    /// actor with exactly what the vault will ask for.
+    /// @dev Mirrors `MinimalVault._convertToAssetsForMint` (ceil, virtual pair), so the handler can
+    /// pre-fund the actor with exactly what the vault will ask for.
     function _previewMint(uint256 shares, uint256 assetsBefore, uint256 supplyBefore)
         internal
         pure
@@ -413,20 +485,20 @@ contract VaultHandler {
     {
         if (shares == 0) return 0;
         if (supplyBefore == 0) return shares;
-        return (shares * assetsBefore + supplyBefore - 1) / supplyBefore;
+        return (shares * (assetsBefore + 1) + supplyBefore) / (supplyBefore + 1);
     }
 
-    /// @dev Mirrors the FLOOR pricing of `MinimalVault.redeem`.
+    /// @dev Mirrors the FLOOR pricing of `MinimalVault.redeem` (virtual pair).
     function _previewRedeem(uint256 shares, uint256 assetsBefore, uint256 supplyBefore)
         internal
         pure
         returns (uint256)
     {
-        if (shares == 0 || supplyBefore == 0) return 0;
-        return (shares * assetsBefore) / supplyBefore;
+        if (shares == 0 || supplyBefore == 0 || assetsBefore == 0) return 0;
+        return (shares * (assetsBefore + 1)) / (supplyBefore + 1);
     }
 
-    /// @dev Mirrors `MinimalVault._convertToShares` (floor) for deposit previews.
+    /// @dev Mirrors `MinimalVault._convertToShares` (floor, virtual pair) for deposit previews.
     function _previewDeposit(uint256 amount, uint256 assetsBefore, uint256 supplyBefore)
         internal
         pure
@@ -434,17 +506,17 @@ contract VaultHandler {
     {
         if (supplyBefore == 0) return amount;
         if (assetsBefore == 0) return 0;
-        return (amount * supplyBefore) / assetsBefore;
+        return (amount * (supplyBefore + 1)) / (assetsBefore + 1);
     }
 
-    /// @dev Mirrors the ceiling share burn computed by `MinimalVault.withdraw`.
+    /// @dev Mirrors the ceiling share burn computed by `MinimalVault.withdraw` (virtual pair).
     function _previewWithdraw(uint256 assets, uint256 assetsBefore, uint256 supplyBefore)
         internal
         pure
         returns (uint256)
     {
         if (supplyBefore == 0 || assetsBefore == 0) return 0;
-        return (assets * supplyBefore + assetsBefore - 1) / assetsBefore;
+        return (assets * (supplyBefore + 1) + assetsBefore) / (assetsBefore + 1);
     }
 
     /// @dev Records a broken post-condition instead of reverting. See the contract doc.

@@ -15,7 +15,7 @@ contract TransferFromApprovalTest {
     function setUp() public {
         token = new MockERC20();
         mock = new MockStrategy(token);
-        vault = new MinimalVault(IERC20(address(token)), IStrategy(address(mock)));
+        vault = new MinimalVault(IERC20(address(token)), IStrategy(address(mock)), address(this));
     }
 
     function test_transferFromEmitsApprovalWhenAllowanceReduced() public {

@@ -23,19 +23,19 @@ contract MinimalVaultDecimalsTest {
         // Standard 18-decimal token
         MockERC20 t18 = new MockERC20();
         MockStrategy s18 = new MockStrategy(t18);
-        MinimalVault v18 = new MinimalVault(IERC20(address(t18)), IStrategy(address(s18)));
+        MinimalVault v18 = new MinimalVault(IERC20(address(t18)), IStrategy(address(s18)), address(this));
         require(v18.decimals() == t18.decimals(), "expected 18 decimal match");
 
         // Non-standard token with 6 decimals
         MockNonStandardERC20 t6 = new MockNonStandardERC20();
         MockStrategy s6 = new MockStrategy(MockERC20(address(t6)));
-        MinimalVault v6 = new MinimalVault(IERC20(address(t6)), IStrategy(address(s6)));
+        MinimalVault v6 = new MinimalVault(IERC20(address(t6)), IStrategy(address(s6)), address(this));
         require(v6.decimals() == t6.decimals(), "expected 6 decimal match");
 
         // Token with no decimals() method should cause the vault to fall back to 18
         MockNoDecimals none = new MockNoDecimals();
         IStrategy nullStrat = IStrategy(address(new NullStrategy()));
-        MinimalVault vnone = new MinimalVault(IERC20(address(none)), nullStrat);
+        MinimalVault vnone = new MinimalVault(IERC20(address(none)), nullStrat, address(this));
         require(vnone.decimals() == 18, "expected fallback to 18 when token has no decimals()");
     }
 }

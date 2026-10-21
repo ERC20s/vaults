@@ -46,7 +46,7 @@ contract MinimalVaultTest {
     function setUp() public {
         token = new MockERC20();
         mock = new MockStrategy(token);
-        vault = new MinimalVault(IERC20(address(token)), IStrategy(address(mock)));
+        vault = new MinimalVault(IERC20(address(token)), IStrategy(address(mock)), address(this));
     }
 
     function test_DepositApprovesAndStrategyConsumesAllowance() public {
@@ -118,14 +118,16 @@ contract MinimalVaultTest {
         // Donation: 1000e18 pushed straight into the strategy, no shares minted for it.
         token.mint(address(mock), 1_000e18);
 
-        // 999e18 now prices at (999e18 * 1) / (1000e18 + 1) == 0 shares.
-        require(vault.convertToShares(999e18) == 0, "setup: expected a zero-share quote");
+        // With one virtual share and one virtual asset, 400e18 now prices at
+        // 400e18 * (1 + 1) / (1000e18 + 1 + 1) == 0 shares. (Before the virtual pair the
+        // threshold was a full 1000e18; the pair halves the inflated price, which is the point.)
+        require(vault.convertToShares(400e18) == 0, "setup: expected a zero-share quote");
 
-        token.mint(address(this), 999e18);
-        token.approve(address(vault), 999e18);
+        token.mint(address(this), 400e18);
+        token.approve(address(vault), 400e18);
         uint256 balanceBefore = token.balanceOf(address(this));
 
-        try vault.deposit(999e18) returns (uint256) {
+        try vault.deposit(400e18) returns (uint256) {
             require(false, "deposit minted zero shares instead of reverting");
         } catch {
             // expected: "MinimalVault: zero-shares"
@@ -155,7 +157,7 @@ contract MinimalVaultTest {
     /// totalAssets() and unreachable through withdraw().
     function test_DepositRevertsWhenStrategyPullsOnlyPart() public {
         MockPartialPullStrategy partialPull = new MockPartialPullStrategy(token);
-        MinimalVault v2 = new MinimalVault(IERC20(address(token)), IStrategy(address(partialPull)));
+        MinimalVault v2 = new MinimalVault(IERC20(address(token)), IStrategy(address(partialPull)), address(this));
 
         partialPull.setPullBps(5_000); // pulls half
 
@@ -176,7 +178,7 @@ contract MinimalVaultTest {
     /// @notice A strategy that pulls nothing at all is rejected by the same guard.
     function test_DepositRevertsWhenStrategyPullsNothing() public {
         MockPartialPullStrategy partialPull = new MockPartialPullStrategy(token);
-        MinimalVault v2 = new MinimalVault(IERC20(address(token)), IStrategy(address(partialPull)));
+        MinimalVault v2 = new MinimalVault(IERC20(address(token)), IStrategy(address(partialPull)), address(this));
 
         partialPull.setPullBps(0);
 
@@ -195,7 +197,7 @@ contract MinimalVaultTest {
     /// misbehaviour rather than the fixture itself.
     function test_DepositAcceptedWhenPartialPullFixturePullsEverything() public {
         MockPartialPullStrategy partialPull = new MockPartialPullStrategy(token);
-        MinimalVault v2 = new MinimalVault(IERC20(address(token)), IStrategy(address(partialPull)));
+        MinimalVault v2 = new MinimalVault(IERC20(address(token)), IStrategy(address(partialPull)), address(this));
 
         uint256 amount = 1_000e18;
         token.mint(address(this), amount);
@@ -235,7 +237,9 @@ contract MinimalVaultTest {
         uint256 delta = token.balanceOf(address(this)) - balBefore;
 
         require(withdrawn == delta, "redeem return mismatch");
-        require(withdrawn == 3, "redeem paid more than the share was worth");
+        // One share is worth floor(1 * (10 + 1) / (3 + 1)) == 2 with the virtual pair (the pure
+        // proportional 10 / 3 == 3.33 floored to 3 before it). Never more than the share is worth.
+        require(withdrawn == 2, "redeem paid more than the share was worth");
         require(vault.balanceOf(address(this)) == 2, "wrong number of shares burned");
 
         uint256 taAfter = vault.totalAssets();
@@ -501,7 +505,7 @@ contract MinimalVaultTest {
         returns (MockReentrantStrategy rstrat, MinimalVault v, ReentrantDepositor atk)
     {
         rstrat = new MockReentrantStrategy(token);
-        v = new MinimalVault(IERC20(address(token)), IStrategy(address(rstrat)));
+        v = new MinimalVault(IERC20(address(token)), IStrategy(address(rstrat)), address(this));
         atk = new ReentrantDepositor(IVaultLike(address(v)), token);
         rstrat.setHook(address(atk));
 
@@ -519,8 +523,9 @@ contract MinimalVaultTest {
     /// @dev Read-only proof, so it does not need the guard to be absent. The helper only calls
     /// views (which are deliberately NOT guarded) from inside `strategy.withdraw()`: with 100
     /// assets over 100 shares, a redeem of 50 leaves the strategy holding 50 while `totalSupply`
-    /// is still 100, so `convertToShares(50)` quotes 100 shares for 50 assets - double what they
-    /// are worth. That quote is what a nested deposit would have been minted at.
+    /// is still 100, so `convertToShares(50)` quotes 50 * (100 + 1) / (50 + 1) == 100 - 1 wei
+    /// shares for 50 assets - double what they are worth, less the virtual share's wei. That
+    /// quote is what a nested deposit would have been minted at.
     function test_ReentrancyWindowMisPricesDepositsWhileAssetsAreInTransit() public {
         (MockReentrantStrategy rstrat, MinimalVault v, ReentrantDepositor atk) = _reentrantVault(100e18, 0);
 
@@ -533,7 +538,9 @@ contract MinimalVaultTest {
 
         require(atk.observedAssets() == 50e18, "window: totalAssets not depressed");
         require(atk.observedSupply() == 100e18, "window: supply already burned");
-        require(atk.observedShares() == 100e18, "window: expected a doubled quote");
+        uint256 doubled = (uint256(50e18) * (uint256(100e18) + 1)) / (uint256(50e18) + 1); // == 100e18 - 1
+        require(doubled == 100e18 - 1, "setup: doubled quote arithmetic");
+        require(atk.observedShares() == doubled, "window: expected a doubled quote");
 
         // Outside the window the same quote is honest again.
         require(v.convertToShares(50e18) == 50e18, "quote still wrong after the call settled");
@@ -674,7 +681,7 @@ contract MinimalVaultTest {
     function test_DecimalsMatchesNonStandardSixDecimalAsset() public {
         MockNonStandardERC20 nstd = new MockNonStandardERC20();
         NullStrategy nstdStrategy = new NullStrategy();
-        MinimalVault nstdVault = new MinimalVault(IERC20(address(nstd)), IStrategy(address(nstdStrategy)));
+        MinimalVault nstdVault = new MinimalVault(IERC20(address(nstd)), IStrategy(address(nstdStrategy)), address(this));
 
         require(nstdVault.decimals() == 6, "decimals should match 6-decimal asset");
     }

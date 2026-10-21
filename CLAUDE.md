@@ -11,12 +11,16 @@ Install Foundry (if `forge` is missing):
 mkdir -p ~/.foundry/bin && curl -L https://github.com/foundry-rs/foundry/releases/download/stable/foundry_stable_linux_amd64.tar.gz | tar -xz -C ~/.foundry/bin && export PATH=~/.foundry/bin:$PATH
 ```
 
-Build and check (the `run:` block of `.d8a` declares `test`; CI in `.github/workflows/ci.yml` runs both):
+Build and check (the `run:` block of `.d8a` declares `test`; CI in `.github/workflows/ci.yml` runs all three):
 
 ```
 forge build
 forge test -vvv
+slither . --fail-medium     # pip install slither-analyzer==0.11.6; settings in slither.config.json
 ```
+
+Slither's medium-or-higher findings on the current code are triaged inline (`slither-disable-next-line`)
+and explained in `SECURITY.md` under "Slither triage"; a new finding fails CI until fixed or triaged there.
 
 Compiler: solc 0.8.19 (`foundry.toml` and every `pragma solidity ^0.8.19`). Qualified event
 access (`emit MinimalVault.Harvest(...)`) needs 0.8.21, so tests declare the events locally instead.

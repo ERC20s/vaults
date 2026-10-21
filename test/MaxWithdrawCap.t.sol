@@ -15,7 +15,7 @@ contract MaxWithdrawCapTest {
     function setUp() public {
         token = new MockERC20();
         bad = new MockPartialPullStrategy(token);
-        vault = new MinimalVault(IERC20(address(token)), IStrategy(address(bad)));
+        vault = new MinimalVault(IERC20(address(token)), IStrategy(address(bad)), address(this));
     }
 
     /// Strategy lies by reporting maxWithdraw > totalAssets. Vault must cap the reported

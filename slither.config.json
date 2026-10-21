@@ -1,0 +1,4 @@
+{
+  "filter_paths": "test/",
+  "exclude_optimization": true
+}
