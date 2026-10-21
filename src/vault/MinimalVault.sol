@@ -48,9 +48,8 @@ contract MinimalVault is IERC4626 {
     uint256 private constant _NOT_ENTERED = 1;
     uint256 private constant _ENTERED = 2;
 
-    /// @dev Standard ERC-4626 Deposit and Withdraw events, plus ERC20 Transfer/Approval for shares.
-    event Deposit(address indexed caller, address indexed owner, uint256 assets, uint256 shares);
-    event Withdraw(address indexed caller, address indexed receiver, uint256 assets, uint256 shares);
+    /// @dev ERC20 Transfer/Approval for shares. The ERC-4626 Deposit and Withdraw events are
+    /// inherited from IERC4626; redeclaring them here is a compile error.
     event Transfer(address indexed from, address indexed to, uint256 value);
     event Approval(address indexed owner, address indexed spender, uint256 value);
 

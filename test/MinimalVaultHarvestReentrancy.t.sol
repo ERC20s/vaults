@@ -2,7 +2,7 @@
 pragma solidity ^0.8.19;
 
 import {MockERC20} from "./mocks/MockERC20.sol";
-import {MockReentrantStrategy, ReentrantDepositor} from "./mocks/MockReentrantStrategy.sol";
+import {MockReentrantStrategy, ReentrantDepositor, IVaultLike} from "./mocks/MockReentrantStrategy.sol";
 import {MinimalVault} from "../src/vault/MinimalVault.sol";
 import {IStrategy} from "../src/interfaces/IStrategy.sol";
 import {IERC20} from "../src/utils/SafeERC20.sol";
@@ -20,11 +20,16 @@ contract MinimalVaultHarvestReentrancyTest {
     MinimalVault vault;
     ReentrantDepositor depositor;
 
+    // Local declarations of the event signatures the vault emits so vm.expectEmit can match them
+    // (qualified `emit MinimalVault.Harvest` needs solc >= 0.8.21; this repo pins 0.8.19).
+    event Harvest(address indexed caller, uint256 harvested);
+    event Panic(address indexed caller);
+
     function setUp() public {
         token = new MockERC20();
         mock = new MockReentrantStrategy(token);
         vault = new MinimalVault(IERC20(address(token)), IStrategy(address(mock)));
-        depositor = new ReentrantDepositor(MinimalVault(address(vault)), token);
+        depositor = new ReentrantDepositor(IVaultLike(address(vault)), token);
         mock.setHook(address(depositor));
 
         // Fund the strategy so harvest has something to report and panic has something to recover.
@@ -37,6 +42,7 @@ contract MinimalVaultHarvestReentrancyTest {
         // Price a baseline so the vault has supply and assets to reason about.
         token.mint(address(mock), 1_000e18);
         // Create initial deposit through the vault so totalSupply > 0 and strategy has principal.
+        token.mint(address(this), 1_000e18);
         token.approve(address(vault), 1_000e18);
         vault.deposit(1_000e18);
 
@@ -52,18 +58,22 @@ contract MinimalVaultHarvestReentrancyTest {
         // After the failed (reverted) attempt the fired flag prevents further callbacks, so disarm and try again
         mock.armHarvest(false);
 
+        // The reverted attempt realised nothing, so the gain above principal is still unharvested.
+        // Read it without calling mock.harvest(), which would consume it before the vault does.
+        uint256 expected = mock.totalAssets() - mock.principal();
+        require(expected > 0, "no gain to harvest");
+
         // Expect Harvest event and a successful harvest now
         vm.expectEmit(true, false, false, true);
-        emit MinimalVault.Harvest(address(this), mock.harvest());
+        emit Harvest(address(this), expected);
         uint256 harvested = vault.harvest();
-        // harvested should be >= 0; explicit equality to mock.harvest() is not strict because mock.harvest()
-        // advances the strategy's principal; the test ensures the call succeeds when unarmed.
-        require(harvested >= 0, "harvest failed when unarmed");
+        require(harvested == expected, "harvest returned unexpected value when unarmed");
     }
 
     function test_panic_reentrancy_isBlocked_then_allowedWhenDisarmed() public {
         // Price a baseline so the vault has supply and assets to reason about.
         token.mint(address(mock), 1_000e18);
+        token.mint(address(this), 1_000e18);
         token.approve(address(vault), 1_000e18);
         vault.deposit(1_000e18);
 
@@ -79,7 +89,7 @@ contract MinimalVaultHarvestReentrancyTest {
         mock.armPanic(false);
 
         vm.expectEmit(true, false, false, false);
-        emit MinimalVault.Panic(address(this));
+        emit Panic(address(this));
         vault.panic();
         require(mock.maxWithdraw() == mock.totalAssets(), "panic did not recover assets");
     }
