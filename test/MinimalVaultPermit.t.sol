@@ -2,6 +2,7 @@
 pragma solidity ^0.8.19;
 
 import {MockERC20Permit} from "./mocks/MockERC20Permit.sol";
+import {MockERC20} from "./mocks/MockERC20.sol";
 import {MockStrategy} from "./mocks/MockStrategy.sol";
 import {MinimalVault} from "../src/vault/MinimalVault.sol";
 import {IStrategy} from "../src/interfaces/IStrategy.sol";

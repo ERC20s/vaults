@@ -74,12 +74,14 @@ contract MinimalVaultTest {
         // make part illiquid so withdraw will be capped
         mock.setIlliquid(1500e18);
 
+        // The cap is an upper bound read BEFORE the call; the payout itself lowers maxWithdraw().
+        uint256 capBefore = mock.maxWithdraw();
         uint256 before = token.balanceOf(address(this));
         uint256 withdrawn = vault.withdraw(1_000e18);
         uint256 delta = token.balanceOf(address(this)) - before;
 
         require(withdrawn == delta, "withdraw return mismatch");
-        require(withdrawn <= mock.maxWithdraw(), "exceeded strategy maxWithdraw");
+        require(withdrawn <= capBefore, "exceeded strategy maxWithdraw");
     }
 
     function test_ShareMathBootstrapAndConservativeRounding() public {
@@ -152,10 +154,10 @@ contract MinimalVaultTest {
     /// silently under-credited: leftover underlying in the vault is invisible to
     /// totalAssets() and unreachable through withdraw().
     function test_DepositRevertsWhenStrategyPullsOnlyPart() public {
-        MockPartialPullStrategy partial = new MockPartialPullStrategy(token);
-        MinimalVault v2 = new MinimalVault(IERC20(address(token)), IStrategy(address(partial)));
+        MockPartialPullStrategy partialPull = new MockPartialPullStrategy(token);
+        MinimalVault v2 = new MinimalVault(IERC20(address(token)), IStrategy(address(partialPull)));
 
-        partial.setPullBps(5_000); // pulls half
+        partialPull.setPullBps(5_000); // pulls half
 
         uint256 amount = 1_000e18;
         token.mint(address(this), amount);
@@ -173,10 +175,10 @@ contract MinimalVaultTest {
 
     /// @notice A strategy that pulls nothing at all is rejected by the same guard.
     function test_DepositRevertsWhenStrategyPullsNothing() public {
-        MockPartialPullStrategy partial = new MockPartialPullStrategy(token);
-        MinimalVault v2 = new MinimalVault(IERC20(address(token)), IStrategy(address(partial)));
+        MockPartialPullStrategy partialPull = new MockPartialPullStrategy(token);
+        MinimalVault v2 = new MinimalVault(IERC20(address(token)), IStrategy(address(partialPull)));
 
-        partial.setPullBps(0);
+        partialPull.setPullBps(0);
 
         uint256 amount = 500e18;
         token.mint(address(this), amount);
@@ -192,8 +194,8 @@ contract MinimalVaultTest {
     /// @notice Control: the same fixture at a full pull is accepted, so the guard rejects
     /// misbehaviour rather than the fixture itself.
     function test_DepositAcceptedWhenPartialPullFixturePullsEverything() public {
-        MockPartialPullStrategy partial = new MockPartialPullStrategy(token);
-        MinimalVault v2 = new MinimalVault(IERC20(address(token)), IStrategy(address(partial)));
+        MockPartialPullStrategy partialPull = new MockPartialPullStrategy(token);
+        MinimalVault v2 = new MinimalVault(IERC20(address(token)), IStrategy(address(partialPull)));
 
         uint256 amount = 1_000e18;
         token.mint(address(this), amount);
@@ -202,9 +204,9 @@ contract MinimalVaultTest {
         uint256 shares = v2.deposit(amount);
 
         require(shares == amount, "bootstrap not 1:1");
-        require(token.balanceOf(address(partial)) == amount, "strategy custody missing");
+        require(token.balanceOf(address(partialPull)) == amount, "strategy custody missing");
         require(token.balanceOf(address(v2)) == 0, "tokens stranded in the vault");
-        require(token.allowance(address(v2), address(partial)) == 0, "allowance left dangling");
+        require(token.allowance(address(v2), address(partialPull)) == 0, "allowance left dangling");
     }
 
     // --- Redemption rounding (a redeem must never dilute the holders who stay) ---

@@ -1,0 +1,23 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  forge:
+    name: forge build + forge test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: foundry-rs/foundry-toolchain@v1
+        with:
+          version: stable
+
+      - name: forge build
+        run: forge build
+
+      # The `test` entry of the `run:` block in .d8a.
+      - name: forge test -vvv
+        run: forge test -vvv

@@ -4,6 +4,7 @@ pragma solidity ^0.8.19;
 import {MockERC20} from "./mocks/MockERC20.sol";
 import {MockStrategy} from "./mocks/MockStrategy.sol";
 import {ReferenceVault} from "./mocks/ReferenceVault.sol";
+import {IStrategy} from "../src/interfaces/IStrategy.sol";
 
 /// @notice Tests for the test-only ReferenceVault that demonstrate the custody rule.
 contract ReferenceVaultTest {
@@ -45,12 +46,14 @@ contract ReferenceVaultTest {
         // Make part of position illiquid to test cap behavior.
         mock.setIlliquid(500e18);
 
+        // The cap is an upper bound read BEFORE the call; the payout itself lowers maxWithdraw().
+        uint256 capBefore = mock.maxWithdraw();
         uint256 before = token.balanceOf(address(this));
         uint256 withdrawn = vault.withdraw(1_000e18);
         uint256 delta = token.balanceOf(address(this)) - before;
 
         require(withdrawn == delta, "vault returned mismatch");
-        require(withdrawn <= mock.maxWithdraw(), "withdraw exceeded maxWithdraw");
+        require(withdrawn <= capBefore, "withdraw exceeded maxWithdraw");
     }
 
     // Views are forwarded to the strategy.

@@ -5,6 +5,7 @@ import {MockERC20} from "./mocks/MockERC20.sol";
 import {MockStrategy} from "./mocks/MockStrategy.sol";
 import {MinimalVault} from "../src/vault/MinimalVault.sol";
 import {IStrategy} from "../src/interfaces/IStrategy.sol";
+import {IERC20} from "../src/utils/SafeERC20.sol";
 
 contract RedeemOverflowTest {
     MockERC20 token;
@@ -14,46 +15,47 @@ contract RedeemOverflowTest {
     function setUp() public {
         token = new MockERC20();
         mock = new MockStrategy(token);
-        vault = new MinimalVault(IStrategy(address(mock)) == IStrategy(address(mock)) ? IERC20(address(token)) : IERC20(address(token)), IStrategy(address(mock)));
+        vault = new MinimalVault(IERC20(address(token)), IStrategy(address(mock)));
+
+        // Strategy boundary: the vault must be wired to exactly this strategy and this underlying,
+        // otherwise the custody checks below would be measuring the wrong contracts.
+        require(address(vault.strategy()) == address(mock), "vault not bound to the mock strategy");
+        require(vault.asset() == address(token), "vault not bound to the mock token");
     }
 
-    /// @notice Construct extreme but valid values to exercise the mulDiv path and ensure
-    /// redeem uses the full-precision helper rather than allowing an intermediate overflow.
-    /// This test mints a large supply and a very large mocked strategy balance, then attempts
-    /// a single-share redeem that would overflow intermediate multiplication if naive math
-    /// were used. The call should either revert with a controlled error (no-liquidity/zero-assets)
-    /// or succeed without silent wrapping.
+    /// @notice Redeem with `shares * totalAssets` larger than 2^256 - 1. A naive
+    /// `shares * totalAssets / totalSupply` would panic on overflow; `_mulDivFloor` must return the
+    /// exact floored quotient, and the strategy must pay out exactly that amount.
     function test_RedeemHandlesExtremeInputs() public {
-        // Large totalSupply and totalAssets that together would overflow (shares * totalAssets)
-        uint256 big = type(uint256).max / 2 + 2; // picked to make products overflow in naive mul
+        // Bootstrap 3 shares 1:1 against 3 assets.
+        token.mint(address(this), 3);
+        token.approve(address(vault), 3);
+        require(vault.deposit(3) == 3, "bootstrap failed");
 
-        // Setup: give the strategy a huge balance and the vault a matching supply backing.
-        token.mint(address(mock), big);
-        // We need the vault to have totalSupply > 0 and strategy.totalAssets() > 0.
-        // Create a bootstrap small deposit to set totalSupply > 0 then artificially inflate strategy.
-        token.mint(address(this), 1);
-        token.approve(address(vault), 1);
-        require(vault.deposit(1) == 1, "bootstrap failed");
+        // Inflate the strategy to `big` assets (as yield paid straight into it).
+        uint256 big = type(uint256).max / 2 + 2;
+        token.mint(address(mock), big - 3);
+        require(vault.totalAssets() == big, "strategy not inflated");
 
-        // Now inflate the strategy to an extreme value by minting directly to it.
-        token.mint(address(mock), big - 1);
-        // At this point strategy.totalAssets() is big
+        // The product the naive formula would form really does overflow.
+        uint256 shares = 2;
+        require(big > type(uint256).max / shares, "inputs do not overflow naive multiplication");
 
-        // Ensure caller has at least one share to redeem.
-        uint256 callerShares = vault.balanceOf(address(this));
-        require(callerShares >= 1, "caller has no shares");
+        // floor(2 * big / 3), computed without overflow.
+        uint256 expected = (big / 3) * shares + ((big % 3) * shares) / 3;
 
-        // Attempt redeem(1). If an intermediate overflow were used in assetsRequested
-        // computation, this could wrap or revert unexpectedly. With _mulDivFloor it should work.
-        try vault.redeem(1) returns (uint256 withdrawn) {
-            // Either succeeds and returns a sensible amount not exceeding totalAssets
-            require(withdrawn <= vault.totalAssets(), "withdrawn exceeds totalAssets");
-        } catch {
-            // A revert is acceptable only if it's one of the checked guards; rethrow otherwise.
-            // We cannot inspect the revert message here reliably, so conservatively accept any revert
-            // as long as it didn't corrupt state: caller still has same or fewer shares and totalAssets
-            // is non-negative.
-            require(vault.totalSupply() >= 0, "supply negative");
-        }
+        uint256 callerBefore = token.balanceOf(address(this));
+        uint256 withdrawn = vault.redeem(shares);
+
+        require(withdrawn == expected, "redeem did not pay floor(shares * totalAssets / totalSupply)");
+        // Custody rule: the strategy pushed exactly `withdrawn`, the vault forwarded all of it and
+        // kept nothing, and the strategy still answers maxWithdraw() <= totalAssets().
+        require(token.balanceOf(address(this)) - callerBefore == withdrawn, "caller balance delta != withdrawn");
+        require(mock.totalAssets() == big - withdrawn, "strategy custody off by more than withdrawn");
+        require(token.balanceOf(address(vault)) == 0, "underlying stranded in vault");
+        require(mock.maxWithdraw() <= mock.totalAssets(), "strategy maxWithdraw above totalAssets");
+        // Served in full, so every offered share is burned.
+        require(vault.totalSupply() == 1, "wrong shares burned");
+        require(vault.balanceOf(address(this)) == 1, "caller share balance wrong");
     }
 }
