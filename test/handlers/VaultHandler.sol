@@ -184,12 +184,11 @@ contract VaultHandler {
                 token.balanceOf(address(actor)) + amount == actorBefore,
                 "deposit() did not take exactly `amount` from the depositor"
             );
-            if (supplyBefore > 0) {
-                _check(
-                    shares * (assetsBefore + 1) <= amount * (supplyBefore + 1),
-                    "deposit() minted more shares than the pre-deposit price allows"
-                );
-            }
+            // Applies to an empty vault too: one that still holds assets prices against them.
+            _check(
+                shares * (assetsBefore + 1) <= amount * (supplyBefore + 1),
+                "deposit() minted more shares than the pre-deposit price allows"
+            );
             _check(
                 token.balanceOf(address(vault)) == 0,
                 "deposit() left underlying stranded in the vault"
@@ -238,12 +237,10 @@ contract VaultHandler {
                 vault.balanceOf(address(actor)) == sharesBefore + shares,
                 "mint() credited something other than the shares asked for"
             );
-            if (supplyBefore > 0) {
-                _check(
-                    assets * (supplyBefore + 1) >= shares * (assetsBefore + 1),
-                    "mint() collected less than the shares it minted are worth"
-                );
-            }
+            _check(
+                assets * (supplyBefore + 1) >= shares * (assetsBefore + 1),
+                "mint() collected less than the shares it minted are worth"
+            );
             _check(token.balanceOf(address(vault)) == 0, "mint() left underlying stranded in the vault");
             assetsIn += assets;
             sharesMinted += shares;
@@ -464,12 +461,11 @@ contract VaultHandler {
     /// @dev assets-per-share never falls, compared CROSS-MULTIPLIED with the virtual pair the vault
     /// prices with, so there is no division and no dust tolerance:
     /// `(assetsAfter + 1) / (supplyAfter + 1) >= (assetsBefore + 1) / (supplyBefore + 1)`.
-    /// Skipped when either side has no shares outstanding: an empty vault has no price at all, and
-    /// the 1:1 bootstrap of the first deposit into a vault that already holds donated assets is a
-    /// price change from nothing, not a fall.
+    /// Not skipped for an empty vault: the virtual pair prices it too, and the step where the last
+    /// holder leaves the virtual share's cut behind and the next depositor is let in is exactly
+    /// where a 1:1 re-bootstrap would make the price fall.
     function _checkSharePrice(uint256 assetsBefore, uint256 supplyBefore, string memory reason) internal {
         uint256 supplyAfter = vault.totalSupply();
-        if (supplyBefore == 0 || supplyAfter == 0) return;
         _check(
             (strategy.totalAssets() + 1) * (supplyBefore + 1) >= (assetsBefore + 1) * (supplyAfter + 1),
             reason
@@ -484,7 +480,6 @@ contract VaultHandler {
         returns (uint256)
     {
         if (shares == 0) return 0;
-        if (supplyBefore == 0) return shares;
         return (shares * (assetsBefore + 1) + supplyBefore) / (supplyBefore + 1);
     }
 
@@ -504,8 +499,7 @@ contract VaultHandler {
         pure
         returns (uint256)
     {
-        if (supplyBefore == 0) return amount;
-        if (assetsBefore == 0) return 0;
+        if (supplyBefore > 0 && assetsBefore == 0) return 0;
         return (amount * (supplyBefore + 1)) / (assetsBefore + 1);
     }
 

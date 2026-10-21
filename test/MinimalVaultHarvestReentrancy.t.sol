@@ -32,19 +32,20 @@ contract MinimalVaultHarvestReentrancyTest {
         depositor = new ReentrantDepositor(IVaultLike(address(vault)), token);
         mock.setHook(address(depositor));
 
-        // Fund the strategy so harvest has something to report and panic has something to recover.
-        token.mint(address(mock), 1_000e18);
-        // Also give the depositor funds to make nested deposits when the window opens.
+        // The strategy is funded in each test AFTER the first deposit: an empty vault that already
+        // holds assets prices a deposit against them, so a 1,000e18 deposit into 2,000e18 of
+        // pre-funded assets would mint zero shares. Harvest and panic see the same gain either way.
+        // Give the depositor funds to make nested deposits when the window opens.
         token.mint(address(depositor), 1_000e18);
     }
 
     function test_harvest_reentrancy_isBlocked_then_allowedWhenDisarmed() public {
-        // Price a baseline so the vault has supply and assets to reason about.
-        token.mint(address(mock), 1_000e18);
         // Create initial deposit through the vault so totalSupply > 0 and strategy has principal.
         token.mint(address(this), 1_000e18);
         token.approve(address(vault), 1_000e18);
         vault.deposit(1_000e18);
+        // Fund the strategy so harvest has something to report.
+        token.mint(address(mock), 2_000e18);
 
         // Arm the strategy to reenter during its harvest()
         mock.armHarvest(true);
@@ -72,10 +73,11 @@ contract MinimalVaultHarvestReentrancyTest {
 
     function test_panic_reentrancy_isBlocked_then_allowedWhenDisarmed() public {
         // Price a baseline so the vault has supply and assets to reason about.
-        token.mint(address(mock), 1_000e18);
         token.mint(address(this), 1_000e18);
         token.approve(address(vault), 1_000e18);
         vault.deposit(1_000e18);
+        // Fund the strategy so panic has something to recover.
+        token.mint(address(mock), 2_000e18);
 
         // Arm the strategy to reenter during its panic()
         mock.armPanic(true);
