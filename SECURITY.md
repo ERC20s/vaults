@@ -76,7 +76,9 @@ Share pricing
 - Shares are priced with one virtual share and one virtual asset (the ERC-4626 "decimals offset"
   scheme, offset 0): `shares = assets * (totalSupply + 1) / (totalAssets + 1)` floored on deposit,
   `assets = shares * (totalAssets + 1) / (totalSupply + 1)` floored on redeem, and the ceilings of
-  the same ratios on mint and withdraw. An empty vault (`totalSupply == 0`) bootstraps 1:1.
+  the same ratios on mint and withdraw. A vault with no shares and no assets bootstraps 1:1; a
+  vault with no shares that still holds assets is priced by the same formula (one share costs
+  `totalAssets + 1`), so nothing left in the strategy is handed to the next depositor.
 - Every rounding step favours the vault, and the price `(totalAssets + 1) / (totalSupply + 1)`
   never falls across any call (`invariant_SharePriceNeverFalls`).
 - A wiped-out vault (shares outstanding, `totalAssets() == 0`) has no price: `deposit()` / `mint()`
@@ -105,6 +107,7 @@ Review findings
   -------- | ----- | ------- | ------
   High | `deposit` / `mint` pricing | First-depositor share inflation. The zero-share guard stopped the TOTAL loss only: bootstrap 1 wei, donate D to the strategy, and a victim depositing 2D + 1 was floored to one share worth 1.5D, a 0.5D profit for the attacker. | Fixed: virtual share/asset pair (`_convertToShares`). The attacker can no longer profit and loses at least as much as the victim to within a couple of wei (`test/MinimalVaultInflation.t.sol`, deterministic and fuzzed).
   High | `panic()` | Unrestricted emergency unwind. Anyone could force the strategy's `panic()`, which the interface allows to realise slippage or loss, on every holder, and the vault relayed around any access control a strategy put on it. | Fixed: `onlyGuardian`, immutable guardian set at construction, zero address refused (`test/MinimalVaultPanicAccess.t.sol`).
+  High | `deposit` / `mint` pricing, empty vault | Follow-up review of the fix above: `totalSupply == 0` still bootstrapped 1:1 even when the strategy held assets. The virtual share's cut stays in the strategy when the last holder leaves (0.6D after the attack above), so once the victim exited the attacker re-entered at 1:1, took the cut back and ended with a profit equal to the victim's loss; the same shortcut handed any yield or donation sitting in an empty vault to the next depositor. | Fixed: the virtual-pair formula applies with `totalSupply == 0` too (`_convertToShares`, `_convertToAssets`, `_convertToAssetsForMint`); `invariant_SharePriceNeverFalls` no longer skips empty-vault steps (`test_InflationAttackStaysUnprofitableAfterTheVaultEmpties`, `test_EmptyVaultHoldingAssetsIsPricedAgainstThem`, `testFuzz_RoundTripThroughAnEmptyFundedVaultNeverProfits`).
   Medium | `depositWithPermit` / `mintWithPermit` | Permit front-running DoS. A signature in the mempool could be submitted to `token.permit()` by anyone; the nonce was consumed and the owner's own deposit reverted inside `permit()` with the allowance already in place, on every retry. | Fixed: `_tryPermit` tolerates a failed permit and lets `safeTransferFrom` gate the deposit on the allowance (`test/MinimalVaultAssetPermit.t.sol`). Replayed, expired and forged permits still move nothing.
   Medium | `maxRedeem(owner)` | Dishonest limit. `floor(cap * totalSupply / totalAssets)` under-reported: with 3 shares over 10 assets a holder of one share was told 0 although `redeem(1)` pays. ERC-4626 requires the maximum that will not revert. | Fixed: exact largest share count whose floor value fits the cap; 0 when the cap is 0 (`test/MinimalVaultRounding.t.sol`, `invariant_OwnerLimitsAreHonest`).
   Medium | fee-on-transfer assets | A deflationary asset failed inside the strategy's pull with an opaque reason, and a strategy that tolerates a short pull would have minted shares priced on the full amount. | Fixed: explicit exact-delta check and revert reason in `_pullIntoStrategy`; documented as unsupported above (`test/MinimalVaultUnsupportedAssets.t.sol`).
@@ -122,8 +125,10 @@ Residual risks
   who spends D can still make a victim lose up to one share's value (about D / 3 in the worst
   shape for a 1 wei bootstrap), paying at least as much themselves to within a couple of wei of
   rounding. Raising the virtual share count (a larger decimals
-  offset) shrinks the victim's loss by the same factor; it was left at 0 so an empty vault still
-  bootstraps 1:1. Front ends should quote `previewDeposit` and refuse a deposit whose share value
+  offset) shrinks the victim's loss by the same factor; it was left at 0 so a vault with no shares
+  and no assets still bootstraps 1:1. Whatever the virtual share holds when the last holder leaves
+  stays in the strategy and raises the price the next depositor pays; it is not redeemable by
+  anyone. Front ends should quote `previewDeposit` and refuse a deposit whose share value
   is far below the assets paid.
 - Read-only reentrancy, as above.
 - Rebasing and fee-on-transfer assets, as above.
@@ -137,8 +142,8 @@ Slither triage
   - `incorrect-equality` (dangerous strict equality) on `deposit`, `depositWithPermit`, `mint`,
     `mintWithPermit`, `withdraw`, `redeem`, `pricePerShare`, `previewWithdraw`, `maxRedeem`,
     `_pullIntoStrategy`, `_assertStrategyPulled`, `_convertToShares`, `_convertToAssets`,
-    `_convertToAssetsForMint`, `_mulDivFloor`, `_mulDivCeil`. Every comparison is intentional:
-    `totalSupply == 0` is the bootstrap / wiped-out branch; `balance == before + amount` and
+    `_mulDivFloor`, `_mulDivCeil`. Every comparison is intentional:
+    `totalSupply == 0` / `totalAssets == 0` are the empty and wiped-out branches; `balance == before + amount` and
     `balance == before` are the custody rule stated exactly (a token that delivers less is refused
     on purpose); `got == withdrawn` is the push rule; `withdrawn == assetsRequested` separates a
     full redemption from a shortfall; `prod1 == 0` and `mulmod(...) == 0` are the exact-division

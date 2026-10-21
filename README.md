@@ -104,7 +104,9 @@ cannot reach it; any allowance the strategy left unused is reset to zero.
 Shares are priced with one VIRTUAL share and one virtual asset - the ERC-4626 "decimals offset"
 scheme with an offset of 0: a deposit mints `floor(assets * (totalSupply + 1) / (totalAssets + 1))`
 and a redemption pays `floor(shares * (totalAssets + 1) / (totalSupply + 1))`, with the ceilings of
-the same ratios on mint and withdraw. An empty vault still bootstraps 1:1. The pair exists because
+the same ratios on mint and withdraw. A vault with no shares and no assets bootstraps 1:1; one with
+no shares that still holds assets (the virtual share's cut after the last exit, yield or a donation)
+is priced by the same formula, so the next depositor cannot take those assets. The pair exists because
 the zero-share guard alone only stops the TOTAL loss of the first-depositor inflation attack: with
 plain proportional pricing an attacker who bootstraps with 1 wei and donates D to the strategy
 still profits 0.5 D from a victim who deposits 2 D + 1 (floored to one share worth 1.5 D). With the
@@ -113,7 +115,7 @@ vault itself holding one share of the pot, the same attack loses the attacker 0.
 `SECURITY.md` records the residual griefing bound.
 
 One state has no exchange rate at all, and the vault now says so. An EMPTY vault
-(`totalSupply == 0`) bootstraps 1:1, but a WIPED-OUT vault - shares outstanding while
+(`totalSupply == 0`) is always priced, but a WIPED-OUT vault - shares outstanding while
 `strategy.totalAssets()` reads 0, after a total loss, an emergency unwind that ended empty or a
 strategy drained from outside - cannot price a deposit. `deposit()` and `mint()` require
 `totalSupply == 0 || totalAssets > 0` ("MinimalVault: no-price"), `convertToShares` returns 0

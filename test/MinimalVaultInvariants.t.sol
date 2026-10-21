@@ -66,12 +66,12 @@ contract MinimalVaultInvariantsTest {
     /// ceil on the assets a mint collects, floor on the assets a redemption asks for, ceil on the
     /// shares a payout burns - and this is that promise stated once, over any sequence.
     ///
-    /// Skipped when either side of the step has no shares outstanding: an empty vault has no price,
-    /// and the 1:1 bootstrap into a vault holding donated assets is a price appearing, not falling.
+    /// Not skipped when a side of the step has no shares outstanding: the virtual pair prices an
+    /// empty vault too, and a deposit into an empty vault that still holds assets (the virtual
+    /// share's cut after the last exit, or yield that landed since) must pay that price.
     function invariant_SharePriceNeverFalls() public view {
         uint256 supplyBefore = handler.prevSupply();
         uint256 supplyAfter = vault.totalSupply();
-        if (supplyBefore == 0 || supplyAfter == 0) return;
         // The price the vault quotes includes one virtual share and one virtual asset.
         require(
             (strategy.totalAssets() + 1) * (supplyBefore + 1) >= (handler.prevAssets() + 1) * (supplyAfter + 1),

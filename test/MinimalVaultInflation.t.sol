@@ -132,6 +132,110 @@ contract MinimalVaultInflationTest {
         require(paid <= attackerCost, "the attacker cashed out a profit");
     }
 
+    /// @notice The textbook attack carried through to the end: both parties exit, which leaves the
+    /// virtual share's cut (6e17 here) in the strategy with `totalSupply == 0`. A vault that
+    /// re-bootstraps 1:1 at that point hands the cut to whoever deposits next, so the attacker
+    /// re-enters, takes it back and turns the attack into a profit of about 0.2e18 - exactly what
+    /// the victim lost. Priced with the virtual pair, the empty-but-funded vault charges
+    /// `totalAssets + 1` per share and the re-entry pays back no more than it put in.
+    function test_InflationAttackStaysUnprofitableAfterTheVaultEmpties() public {
+        uint256 donation = 1e18;
+        uint256 reentry = 1e24;
+        uint256 budget = 1 + donation + reentry;
+        token.mint(ATTACKER, budget);
+
+        vm.startPrank(ATTACKER);
+        token.approve(address(vault), type(uint256).max);
+        require(vault.deposit(1) == 1, "attacker bootstrap not 1:1");
+        token.transfer(address(mock), donation);
+        vm.stopPrank();
+
+        uint256 victimDeposit = 2e18 + 1;
+        uint256 victimShares = _depositAs(VICTIM, victimDeposit);
+        require(victimShares == 3, "setup: victim floored to 3 shares");
+
+        vm.startPrank(ATTACKER);
+        require(vault.redeem(1) == 6e17, "setup: attacker redeem");
+        vm.stopPrank();
+        vm.startPrank(VICTIM);
+        require(vault.redeem(victimShares) == 18e17 + 2, "setup: victim redeem");
+        vm.stopPrank();
+
+        uint256 residue = vault.totalAssets();
+        require(vault.totalSupply() == 0 && residue == 6e17, "setup: empty vault holding the virtual share's cut");
+        require(token.balanceOf(VICTIM) + 2e17 - 1 == victimDeposit, "setup: victim's loss");
+
+        vm.startPrank(ATTACKER);
+        uint256 shares = vault.deposit(reentry);
+        vault.redeem(shares);
+        vm.stopPrank();
+
+        require(token.balanceOf(ATTACKER) <= budget, "the attacker reclaimed the residue at a profit");
+        require(vault.totalAssets() >= residue, "the virtual share's cut left the vault");
+    }
+
+    /// @notice An empty vault that still holds assets (the virtual share's cut after everyone left,
+    /// yield that landed after the last exit, a donation before the first deposit) is priced with
+    /// the virtual pair like any other state: one share costs `totalAssets + 1`, never 1.
+    function test_EmptyVaultHoldingAssetsIsPricedAgainstThem() public {
+        uint256 residue = 6e17;
+        token.mint(address(mock), residue);
+        require(vault.totalSupply() == 0, "setup: vault is empty");
+
+        require(vault.previewDeposit(residue + 1) == 1, "previewDeposit ignored the assets already held");
+        require(vault.convertToShares(residue) == 0, "convertToShares ignored the assets already held");
+        require(vault.previewMint(1) == residue + 1, "previewMint ignored the assets already held");
+        require(vault.convertToAssets(1) == residue + 1, "convertToAssets ignored the assets already held");
+
+        token.mint(VICTIM, residue);
+        vm.startPrank(VICTIM);
+        token.approve(address(vault), residue);
+        vm.expectRevert(bytes("MinimalVault: zero-shares"));
+        vault.deposit(residue);
+        vm.stopPrank();
+
+        token.mint(ATTACKER, residue + 1);
+        vm.startPrank(ATTACKER);
+        token.approve(address(vault), residue + 1);
+        require(vault.mint(1) == residue + 1, "mint(1) did not charge totalAssets + 1");
+        vm.stopPrank();
+    }
+
+    /// @notice Fuzzed: whatever an empty vault already holds, a deposit-then-redeem and a
+    /// mint-then-redeem round trip through it never pays out more than went in.
+    function testFuzz_RoundTripThroughAnEmptyFundedVaultNeverProfits(uint96 residueRaw, uint96 amountRaw) public {
+        uint256 residue = (uint256(residueRaw) % 1e24) + 1;
+        uint256 amount = (uint256(amountRaw) % 1e24) + 1;
+        token.mint(address(mock), residue);
+
+        token.mint(ATTACKER, amount);
+        vm.startPrank(ATTACKER);
+        token.approve(address(vault), amount);
+        uint256 quote = vault.previewDeposit(amount);
+        if (quote == 0) {
+            vm.expectRevert(bytes("MinimalVault: zero-shares"));
+            vault.deposit(amount);
+            vm.stopPrank();
+            return;
+        }
+        uint256 shares = vault.deposit(amount);
+        require(shares == quote, "deposit minted other than the preview");
+        uint256 paid = vault.redeem(shares);
+        vm.stopPrank();
+        require(paid <= amount, "deposit/redeem round trip through an empty funded vault profited");
+        require(vault.totalSupply() == 0, "shares outstanding after a full redeem");
+
+        uint256 mintShares = (amount % 1_000) + 1;
+        uint256 cost = vault.previewMint(mintShares);
+        token.mint(ATTACKER, cost);
+        vm.startPrank(ATTACKER);
+        token.approve(address(vault), cost);
+        require(vault.mint(mintShares) == cost, "mint charged other than the preview");
+        uint256 back = vault.redeem(mintShares);
+        vm.stopPrank();
+        require(back <= cost, "mint/redeem round trip through an empty funded vault profited");
+    }
+
     /// @notice What the virtual pair costs an honest holder: a single depositor who collects
     /// yield y and redeems everything gets back at most deposit + y, and at least
     /// deposit + y - y / (deposit + 1) - 1: the virtual share's cut of the YIELD only, never of

@@ -16,8 +16,9 @@ import {IERC20Permit} from "../interfaces/IERC20Permit.sol";
 /// Share pricing uses one virtual share and one virtual asset (the ERC-4626 "decimals
 /// offset" scheme with an offset of 0): `shares = assets * (totalSupply + 1) / (totalAssets + 1)`
 /// and `assets = shares * (totalAssets + 1) / (totalSupply + 1)`, floored or ceiled so that every
-/// rounding step favours the vault. An empty vault (`totalSupply == 0`) still bootstraps 1:1.
-/// See `_convertToShares` for why the virtual pair exists.
+/// rounding step favours the vault. A vault with no shares AND no assets bootstraps 1:1; one with
+/// no shares that still holds assets is priced by the same formula. See `_convertToShares` for why
+/// the virtual pair exists and why that second case gets no 1:1 shortcut.
 contract MinimalVault is IERC4626 {
     using SafeERC20 for IERC20;
 
@@ -174,7 +175,7 @@ contract MinimalVault is IERC4626 {
     ///
     /// Three guards make the floor rounding safe to keep:
     /// - the vault must be able to PRICE the deposit: an empty vault (`totalSupply == 0`)
-    ///   bootstraps 1:1, but a vault with shares outstanding and `strategy.totalAssets()`
+    ///   is always priced, but a vault with shares outstanding and `strategy.totalAssets()`
     ///   at 0 - a total loss, an emergency unwind that ended empty, a strategy drained
     ///   from outside - has no honest exchange rate and must refuse rather than mint 1:1
     ///   against dead shares (see `_convertToShares`);
@@ -704,7 +705,16 @@ contract MinimalVault is IERC4626 {
     /// shares, the attacker's share is worth 0.6D and the attacker LOSES 0.4D. The attack is
     /// never profitable; the residual griefing (an attacker can still make a victim lose, at a
     /// cost at least as large to themselves) is documented in SECURITY.md. This is the ERC-4626
-    /// "decimals offset" scheme with an offset of 0, so an EMPTY vault still bootstraps 1:1.
+    /// "decimals offset" scheme with an offset of 0, so a vault with no shares and no assets still
+    /// bootstraps 1:1.
+    ///
+    /// The formula applies with `totalSupply == 0` too, with no 1:1 shortcut. The virtual share's
+    /// cut stays in the strategy when the last holder leaves - after the attack above that is
+    /// 0.6D - and so do yield that lands after the last exit and a donation made before the first
+    /// deposit. Minting 1:1 against those assets would hand them to whoever deposits next: the
+    /// attacker re-enters once the victim has left, takes the cut back, and the attack turns the
+    /// victim's loss into a profit again. Priced here, one share of an empty vault holding R costs
+    /// R + 1 and the cut stays with the virtual share.
     ///
     /// A WIPED-OUT vault (shares outstanding, no assets) is a different state entirely and must
     /// not be priced: doing so mints new money alongside dead shares and hands part of the
@@ -714,14 +724,11 @@ contract MinimalVault is IERC4626 {
     // slither-disable-next-line incorrect-equality
     function _convertToShares(uint256 amount, uint256 totalAssetsBefore) internal view returns (uint256) {
         uint256 supply = totalSupply;
-        if (supply == 0) {
-            // Bootstrap: 1:1 initial share for asset to keep it simple and deterministic.
-            return amount;
-        }
-        if (totalAssetsBefore == 0) {
+        if (supply > 0 && totalAssetsBefore == 0) {
             // Shares outstanding, nothing behind them: no price.
             return 0;
         }
+        // An empty vault with no assets prices 1:1 here; one that still holds assets does not.
         return _mulDivFloor(amount, supply + 1, totalAssetsBefore + 1); // floor => conservative
     }
 
@@ -738,24 +745,16 @@ contract MinimalVault is IERC4626 {
     // slither-disable-next-line incorrect-equality
     function _convertToAssets(uint256 shares, uint256 totalAssetsBefore) internal view returns (uint256) {
         uint256 supply = totalSupply;
-        if (supply == 0) {
-            return shares;
-        }
-        if (totalAssetsBefore == 0) {
+        if (supply > 0 && totalAssetsBefore == 0) {
             return 0;
         }
         return _mulDivFloor(shares, totalAssetsBefore + 1, supply + 1); // floor
     }
 
     /// @dev Assets a mint of `shares` must collect, CEIL, so the minted shares are fully backed.
-    // Slither: deliberate exact comparisons / guarded post-call writes; see SECURITY.md, "Slither triage".
-    // slither-disable-next-line incorrect-equality
+    /// No `totalSupply == 0` shortcut: an empty vault that still holds assets charges for them.
     function _convertToAssetsForMint(uint256 shares, uint256 totalAssetsBefore) internal view returns (uint256) {
-        uint256 supply = totalSupply;
-        if (supply == 0) {
-            return shares;
-        }
-        return _mulDivCeil(shares, totalAssetsBefore + 1, supply + 1);
+        return _mulDivCeil(shares, totalAssetsBefore + 1, totalSupply + 1);
     }
 
     // Slither: deliberate exact comparisons / guarded post-call writes; see SECURITY.md, "Slither triage".
