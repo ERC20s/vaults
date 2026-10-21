@@ -9,13 +9,26 @@ import {IERC20Permit} from "../interfaces/IERC20Permit.sol";
 /// @title MinimalVault
 /// @notice A small, auditable example vault that demonstrates an ERC-4626-like surface
 /// and the exact custody boundary with an IStrategy. It is intentionally minimal: no
-/// ownership, fees or pausing. The four state-changing entry points are single-entry
-/// (`nonReentrant`); the views are not. Uses SafeERC20 for token ops.
+/// fees, no pausing, an immutable strategy and a single immutable `guardian` that alone may
+/// trigger the strategy's emergency `panic()`. The state-changing entry points are
+/// single-entry (`nonReentrant`); the views are not. Uses SafeERC20 for token ops.
+///
+/// Share pricing uses one virtual share and one virtual asset (the ERC-4626 "decimals
+/// offset" scheme with an offset of 0): `shares = assets * (totalSupply + 1) / (totalAssets + 1)`
+/// and `assets = shares * (totalAssets + 1) / (totalSupply + 1)`, floored or ceiled so that every
+/// rounding step favours the vault. An empty vault (`totalSupply == 0`) still bootstraps 1:1.
+/// See `_convertToShares` for why the virtual pair exists.
 contract MinimalVault is IERC4626 {
     using SafeERC20 for IERC20;
 
     IERC20 public immutable token;
     IStrategy public immutable strategy;
+
+    /// @notice The only address allowed to call `panic()`. `IStrategy.panic()` is an emergency
+    /// unwind that may realise slippage or loss, and real strategies restrict it; a vault that
+    /// forwarded it for anyone would be an open relay around that restriction. Immutable: this
+    /// vault has no ownership and no rotation path, by design.
+    address public immutable guardian;
 
     mapping(address => uint256) public balanceOf;
     uint256 public totalSupply;
@@ -29,8 +42,16 @@ contract MinimalVault is IERC4626 {
     /// nonces[owner] increments for every successful permit to prevent signature replay.
     mapping(address => uint256) public nonces;
 
-    /// @dev EIP-712 domain separator and permit typehash for constructing the signed digest.
-    bytes32 public immutable DOMAIN_SEPARATOR;
+    /// @dev EIP-712 domain separator inputs and permit typehash for constructing the signed digest.
+    /// The separator is cached for the chain the vault was deployed on and rebuilt on any other
+    /// chain id (see `DOMAIN_SEPARATOR()`), so a share permit signed before a chain fork cannot be
+    /// replayed on the other side of the fork.
+    bytes32 private constant _EIP712_DOMAIN_TYPEHASH =
+        keccak256("EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)");
+    bytes32 private constant _HASHED_NAME = keccak256("MinimalVault Share");
+    bytes32 private constant _HASHED_VERSION = keccak256("1");
+    uint256 private immutable _CACHED_CHAIN_ID;
+    bytes32 private immutable _CACHED_DOMAIN_SEPARATOR;
     bytes32 public constant PERMIT_TYPEHASH = keccak256("Permit(address owner,address spender,uint256 value,uint256 nonce,uint256 deadline)");
 
     /// @notice Cosmetic ERC-20 metadata so wallets and tooling show a sensible label. Purely
@@ -91,24 +112,41 @@ contract MinimalVault is IERC4626 {
         _locked = _NOT_ENTERED;
     }
 
-    constructor(IERC20 token_, IStrategy strategy_) {
+    /// @dev Restricts a call to the `guardian` set at construction.
+    modifier onlyGuardian() {
+        require(msg.sender == guardian, "MinimalVault: not guardian");
+        _;
+    }
+
+    constructor(IERC20 token_, IStrategy strategy_, address guardian_) {
         require(address(token_) != address(0), "MinimalVault: zero-token");
         require(address(strategy_) != address(0), "MinimalVault: zero-strategy");
+        require(guardian_ != address(0), "MinimalVault: zero-guardian");
         token = token_;
         strategy = strategy_;
+        guardian = guardian_;
         decimals = _readDecimals(token_);
 
         // EIP-712 domain separator as per EIP-2612: name, version "1", chainId and address.
-        uint256 chainId;
-        assembly { chainId := chainid() }
-        DOMAIN_SEPARATOR = keccak256(
-            abi.encode(
-                keccak256("EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)"),
-                keccak256(bytes(name)),
-                keccak256(bytes("1")),
-                chainId,
-                address(this)
-            )
+        // `_HASHED_NAME` must stay keccak256 of `name`; both are constants so the compiler holds
+        // them, and the test suite asserts the pair agree.
+        _CACHED_CHAIN_ID = block.chainid;
+        _CACHED_DOMAIN_SEPARATOR = _buildDomainSeparator(block.chainid);
+    }
+
+    /// @notice EIP-712 domain separator for share permits. Cached for the deployment chain and
+    /// recomputed for any other `block.chainid`, so a signature is bound to the chain it was
+    /// made for even after a fork.
+    function DOMAIN_SEPARATOR() public view returns (bytes32) {
+        if (block.chainid == _CACHED_CHAIN_ID) {
+            return _CACHED_DOMAIN_SEPARATOR;
+        }
+        return _buildDomainSeparator(block.chainid);
+    }
+
+    function _buildDomainSeparator(uint256 chainId) private view returns (bytes32) {
+        return keccak256(
+            abi.encode(_EIP712_DOMAIN_TYPEHASH, _HASHED_NAME, _HASHED_VERSION, chainId, address(this))
         );
     }
 
@@ -151,6 +189,8 @@ contract MinimalVault is IERC4626 {
     /// The call is also single-entry (`nonReentrant`): none of the three guards above survives
     /// a nested call, and a callback during `strategy.deposit()` would price against a state
     /// this call has already half-moved.
+    // Slither: deliberate exact comparisons / guarded post-call writes; see SECURITY.md, "Slither triage".
+    // slither-disable-next-line incorrect-equality,reentrancy-benign,reentrancy-no-eth
     function deposit(uint256 amount) external nonReentrant returns (uint256 shares) {
         require(amount > 0, "MinimalVault: zero-assets");
 
@@ -161,28 +201,16 @@ contract MinimalVault is IERC4626 {
         shares = _convertToShares(amount, totalAssetsBefore);
         require(shares > 0, "MinimalVault: zero-shares");
 
-        // Pull tokens from caller into the vault
-        uint256 vaultBefore = tokenBalanceOf(address(this));
-        token.safeTransferFrom(msg.sender, address(this), amount);
-
-        // Approve strategy for exactly amount and let it pull
-        token.safeApprove(address(strategy), amount);
-        strategy.deposit(amount);
-        _assertStrategyPulled(vaultBefore);
-
-        // Mint shares
-        totalSupply += shares;
-        balanceOf[msg.sender] += shares;
-
-        // Emit standard ERC-4626 Deposit and ERC20 Transfer (mint) logs
-        emit Deposit(msg.sender, msg.sender, amount, shares);
-        emit Transfer(address(0), msg.sender, shares);
-
+        _pullIntoStrategy(amount);
+        _mintShares(amount, shares);
         return shares;
     }
 
     /// @notice Deposit `amount` using EIP-2612 permit (owner signs an approval off-chain).
-    /// @dev Calls permit on the asset then follows the same guarded path as deposit().
+    /// @dev Applies the permit (see `_tryPermit` for why a failed permit does not revert on its
+    /// own) and then follows exactly the same guarded path as `deposit()`.
+    // Slither: deliberate exact comparisons / guarded post-call writes; see SECURITY.md, "Slither triage".
+    // slither-disable-next-line incorrect-equality,reentrancy-benign,reentrancy-no-eth
     function depositWithPermit(
         uint256 amount,
         uint256 deadline,
@@ -192,8 +220,7 @@ contract MinimalVault is IERC4626 {
     ) external nonReentrant returns (uint256 shares) {
         require(amount > 0, "MinimalVault: zero-assets");
 
-        // Use permit to set allowance from msg.sender to this vault
-        IERC20Permit(address(token)).permit(msg.sender, address(this), amount, deadline, v, r, s);
+        _tryPermit(amount, deadline, v, r, s);
 
         uint256 totalAssetsBefore = strategy.totalAssets();
         require(totalSupply == 0 || totalAssetsBefore > 0, "MinimalVault: no-price");
@@ -202,23 +229,8 @@ contract MinimalVault is IERC4626 {
         shares = _convertToShares(amount, totalAssetsBefore);
         require(shares > 0, "MinimalVault: zero-shares");
 
-        // Pull tokens from caller into the vault
-        uint256 vaultBefore = tokenBalanceOf(address(this));
-        token.safeTransferFrom(msg.sender, address(this), amount);
-
-        // Approve strategy for exactly amount and let it pull
-        token.safeApprove(address(strategy), amount);
-        strategy.deposit(amount);
-        _assertStrategyPulled(vaultBefore);
-
-        // Mint shares
-        totalSupply += shares;
-        balanceOf[msg.sender] += shares;
-
-        // Emit standard ERC-4626 Deposit and ERC20 Transfer (mint) logs
-        emit Deposit(msg.sender, msg.sender, amount, shares);
-        emit Transfer(address(0), msg.sender, shares);
-
+        _pullIntoStrategy(amount);
+        _mintShares(amount, shares);
         return shares;
     }
 
@@ -227,6 +239,8 @@ contract MinimalVault is IERC4626 {
     /// Mirrors the guards in `deposit()`: the vault must be able to price the mint, no
     /// zero-share or zero-asset mint, and the strategy must take custody of everything
     /// this call pulled in.
+    // Slither: deliberate exact comparisons / guarded post-call writes; see SECURITY.md, "Slither triage".
+    // slither-disable-next-line incorrect-equality,reentrancy-benign,reentrancy-no-eth
     function mint(uint256 shares) external nonReentrant returns (uint256 assets) {
         require(shares > 0, "MinimalVault: zero-shares");
 
@@ -236,24 +250,18 @@ contract MinimalVault is IERC4626 {
         assets = _convertToAssetsForMint(shares, totalAssetsBefore);
         require(assets > 0, "MinimalVault: zero-assets");
 
-        uint256 vaultBefore = tokenBalanceOf(address(this));
-        token.safeTransferFrom(msg.sender, address(this), assets);
-        token.safeApprove(address(strategy), assets);
-        strategy.deposit(assets);
-        _assertStrategyPulled(vaultBefore);
-
-        totalSupply += shares;
-        balanceOf[msg.sender] += shares;
-
-        // Emit standard ERC-4626 Deposit and ERC20 Transfer (mint) logs
-        emit Deposit(msg.sender, msg.sender, assets, shares);
-        emit Transfer(address(0), msg.sender, shares);
-
+        _pullIntoStrategy(assets);
+        _mintShares(assets, shares);
         return assets;
     }
 
     /// @notice Mint `shares` using EIP-2612 permit (owner signs an approval off-chain).
-    /// @dev Calls permit on the asset then follows the same guarded path as mint().
+    /// @dev The permit must be signed over exactly the assets `previewMint(shares)` reports at
+    /// execution time; a price move between signing and execution leaves the signature for the
+    /// wrong value and the mint reverts at `safeTransferFrom` unless an allowance already covers
+    /// it. `depositWithPermit` is the robust gasless path. Otherwise identical to `mint()`.
+    // Slither: deliberate exact comparisons / guarded post-call writes; see SECURITY.md, "Slither triage".
+    // slither-disable-next-line incorrect-equality,reentrancy-benign,reentrancy-no-eth
     function mintWithPermit(
         uint256 shares,
         uint256 deadline,
@@ -270,23 +278,54 @@ contract MinimalVault is IERC4626 {
         assets = _convertToAssetsForMint(shares, totalAssetsBefore);
         require(assets > 0, "MinimalVault: zero-assets");
 
-        // Use permit to set allowance from msg.sender to this vault
-        IERC20Permit(address(token)).permit(msg.sender, address(this), assets, deadline, v, r, s);
+        _tryPermit(assets, deadline, v, r, s);
 
+        _pullIntoStrategy(assets);
+        _mintShares(assets, shares);
+        return assets;
+    }
+
+    /// @dev Applies an EIP-2612 permit from `msg.sender` to this vault for `value`, and
+    /// deliberately tolerates its failure.
+    ///
+    /// A permit signature is public the moment it is in the mempool. Anyone can submit it to
+    /// `token.permit()` directly, which consumes the owner's nonce; the owner's own
+    /// `depositWithPermit` / `mintWithPermit` would then revert inside `permit()` with the
+    /// allowance already in place, and the griefer could do this to every retry. So the permit's
+    /// result is not what gates the deposit: `safeTransferFrom` in `_pullIntoStrategy` is, and it
+    /// reverts unless `msg.sender` really has approved this vault for `value` - by this permit, by
+    /// the front-run copy of it, or by an ordinary `approve()`. A replayed or expired permit
+    /// therefore cannot move anything either: it fails, and without an allowance the pull fails.
+    function _tryPermit(uint256 value, uint256 deadline, uint8 v, bytes32 r, bytes32 s) private {
+        try IERC20Permit(address(token)).permit(msg.sender, address(this), value, deadline, v, r, s) {} catch {}
+    }
+
+    /// @dev Pulls exactly `amount` of the underlying from `msg.sender` and hands it to the
+    /// strategy, asserting both halves of the custody rule in `src/interfaces/IStrategy.sol`:
+    /// - the vault's balance must rise by exactly `amount` on the pull. A fee-on-transfer asset
+    ///   delivers less, and minting shares priced on `amount` against a smaller delivery would
+    ///   dilute every other holder, so such assets are refused outright ("fee-on-transfer");
+    /// - the strategy must then pull everything the vault received (`_assertStrategyPulled`).
+    // Slither: deliberate exact comparisons / guarded post-call writes; see SECURITY.md, "Slither triage".
+    // slither-disable-next-line incorrect-equality,reentrancy-balance
+    function _pullIntoStrategy(uint256 amount) private {
         uint256 vaultBefore = tokenBalanceOf(address(this));
-        token.safeTransferFrom(msg.sender, address(this), assets);
-        token.safeApprove(address(strategy), assets);
-        strategy.deposit(assets);
-        _assertStrategyPulled(vaultBefore);
+        token.safeTransferFrom(msg.sender, address(this), amount);
+        require(tokenBalanceOf(address(this)) == vaultBefore + amount, "MinimalVault: fee-on-transfer");
 
+        // Approve strategy for exactly amount and let it pull
+        token.safeApprove(address(strategy), amount);
+        strategy.deposit(amount);
+        _assertStrategyPulled(vaultBefore);
+    }
+
+    /// @dev Credits `shares` to `msg.sender` for `assets` already in the strategy's custody and
+    /// emits the ERC-4626 Deposit and ERC-20 Transfer (mint) logs.
+    function _mintShares(uint256 assets, uint256 shares) private {
         totalSupply += shares;
         balanceOf[msg.sender] += shares;
-
-        // Emit standard ERC-4626 Deposit and ERC20 Transfer (mint) logs
         emit Deposit(msg.sender, msg.sender, assets, shares);
         emit Transfer(address(0), msg.sender, shares);
-
-        return assets;
     }
 
     /// @notice Withdraw up to `assets` by burning proportional shares from caller.
@@ -296,6 +335,8 @@ contract MinimalVault is IERC4626 {
     /// Single-entry (`nonReentrant`): shares are burned AFTER `strategy.withdraw()` returns, so
     /// a callback fired while the assets are in transit would see a low `totalAssets()` against
     /// an unchanged `totalSupply` and mint against it.
+    // Slither: deliberate exact comparisons / guarded post-call writes; see SECURITY.md, "Slither triage".
+    // slither-disable-next-line incorrect-equality,reentrancy-balance,reentrancy-no-eth,reentrancy-benign
     function withdraw(uint256 assets) external nonReentrant returns (uint256 withdrawn) {
         uint256 totalAssetsBefore = strategy.totalAssets();
         require(totalAssetsBefore > 0 && totalSupply > 0, "no-liquidity");
@@ -307,8 +348,8 @@ contract MinimalVault is IERC4626 {
         require(got == withdrawn, "MinimalVault: strategy returned mismatch");
         require(withdrawn <= assets, "MinimalVault: strategy overpaid");
 
-        // Burn shares proportional to withdrawn amount (ceil)
-        uint256 sharesToBurn = _mulDivCeil(withdrawn, totalSupply, totalAssetsBefore);
+        // Burn shares proportional to withdrawn amount (ceil, virtual pair included)
+        uint256 sharesToBurn = _convertToSharesCeil(withdrawn, totalAssetsBefore);
         require(balanceOf[msg.sender] >= sharesToBurn, "insufficient shares");
         balanceOf[msg.sender] -= sharesToBurn;
         totalSupply -= sharesToBurn;
@@ -343,6 +384,8 @@ contract MinimalVault is IERC4626 {
     /// Single-entry (`nonReentrant`) for the same reason as `withdraw()`: the burn happens after
     /// the strategy has pushed, and a nested `deposit()` in that window mints at a price the
     /// in-transit assets have temporarily depressed.
+    // Slither: deliberate exact comparisons / guarded post-call writes; see SECURITY.md, "Slither triage".
+    // slither-disable-next-line incorrect-equality,reentrancy-balance,reentrancy-no-eth
     function redeem(uint256 shares) external nonReentrant returns (uint256 withdrawn) {
         require(shares > 0, "MinimalVault: zero-shares");
         require(balanceOf[msg.sender] >= shares, "insufficient shares");
@@ -352,7 +395,7 @@ contract MinimalVault is IERC4626 {
         require(totalSupplyBefore > 0 && totalAssetsBefore > 0, "no-liquidity");
 
         // FLOOR: never ask the strategy for more than the shares are worth.
-        uint256 assetsRequested = _mulDivFloor(shares, totalAssetsBefore, totalSupplyBefore);
+        uint256 assetsRequested = _convertToAssets(shares, totalAssetsBefore);
         require(assetsRequested > 0, "MinimalVault: zero-assets");
 
         uint256 before = tokenBalanceOf(address(this));
@@ -368,9 +411,9 @@ contract MinimalVault is IERC4626 {
             sharesToBurn = shares;
         } else {
             // Shortfall: burn only what the payout covers, rounded up.
-            sharesToBurn = _mulDivCeil(withdrawn, totalSupplyBefore, totalAssetsBefore);
-            // withdrawn < floor(shares * totalAssets / totalSupply) makes this strictly
-            // smaller than `shares`; the old cap is an assertion now, not a discount.
+            sharesToBurn = _convertToSharesCeil(withdrawn, totalAssetsBefore);
+            // withdrawn < floor(shares * (totalAssets + 1) / (totalSupply + 1)) makes this at
+            // most `shares`; the old cap is an assertion now, not a discount.
             require(sharesToBurn <= shares, "MinimalVault: burn exceeds shares offered");
         }
 
@@ -413,7 +456,7 @@ contract MinimalVault is IERC4626 {
         bytes32 digest = keccak256(
             abi.encodePacked(
                 "\x19\x01",
-                DOMAIN_SEPARATOR,
+                DOMAIN_SEPARATOR(),
                 keccak256(abi.encode(PERMIT_TYPEHASH, owner, spender, value, ownerNonce, deadline))
             )
         );
@@ -497,6 +540,8 @@ contract MinimalVault is IERC4626 {
     /// @notice Price per share, scaled to 1e18 for a fixed-decimal UI-friendly value.
     /// @dev When the vault is empty (totalSupply == 0) we return 1e18 (bootstrap = 1).
     /// Otherwise return floor(strategy.totalAssets() * 1e18 / totalSupply).
+    // Slither: deliberate exact comparisons / guarded post-call writes; see SECURITY.md, "Slither triage".
+    // slither-disable-next-line incorrect-equality
     function pricePerShare() external view returns (uint256) {
         if (totalSupply == 0) return 1e18;
         return _mulDivFloor(strategy.totalAssets(), 1e18, totalSupply);
@@ -530,8 +575,16 @@ contract MinimalVault is IERC4626 {
         return ownerClaim <= strategyCap ? ownerClaim : strategyCap;
     }
 
-    /// @notice Per-owner max redeem: the largest share count whose floor-priced assets fit
-    /// within the owner's withdraw cap. Computed from a single `strategy.totalAssets()` read.
+    /// @notice Per-owner max redeem: the LARGEST share count `redeem()` would serve in full right
+    /// now - the owner's balance, or fewer when the strategy's liquidity binds. Computed from a
+    /// single `strategy.totalAssets()` read.
+    /// @dev `redeem(s)` asks the strategy for `floor(s * (A + 1) / (S + 1))`, so the answer is the
+    /// largest `s` with that floor `<= cap`, i.e. `ceil((cap + 1) * (S + 1) / (A + 1)) - 1`. The
+    /// earlier `floor(cap * S / A)` under-reported: with 3 shares over 10 assets a holder of one
+    /// share was told 0 although `redeem(1)` pays out. A cap of 0 answers 0 outright, since any
+    /// share count the formula allowed would floor to a zero-asset request `redeem()` refuses.
+    // Slither: deliberate exact comparisons / guarded post-call writes; see SECURITY.md, "Slither triage".
+    // slither-disable-next-line incorrect-equality
     function maxRedeem(address owner) external view returns (uint256) {
         uint256 totalAssetsBefore = strategy.totalAssets();
         if (totalSupply == 0 || totalAssetsBefore == 0) return 0;
@@ -539,8 +592,8 @@ contract MinimalVault is IERC4626 {
         uint256 strategyCap = strategy.maxWithdraw();
         if (strategyCap > totalAssetsBefore) strategyCap = totalAssetsBefore;
         uint256 cap = ownerClaim <= strategyCap ? ownerClaim : strategyCap;
-        // Solve for shares: floor(shares * totalAssetsBefore / totalSupply) <= cap
-        uint256 shares = _mulDivFloor(cap, totalSupply, totalAssetsBefore);
+        if (cap == 0) return 0;
+        uint256 shares = _mulDivCeil(cap + 1, totalSupply + 1, totalAssetsBefore + 1) - 1;
         if (shares > balanceOf[owner]) return balanceOf[owner];
         return shares;
     }
@@ -575,10 +628,12 @@ contract MinimalVault is IERC4626 {
     }
 
     /// @notice Preview how many shares would be burned to withdraw `assets` (ceil).
+    // Slither: deliberate exact comparisons / guarded post-call writes; see SECURITY.md, "Slither triage".
+    // slither-disable-next-line incorrect-equality
     function previewWithdraw(uint256 assets) external view returns (uint256) {
         uint256 totalAssetsBefore = strategy.totalAssets();
         if (totalSupply == 0 || totalAssetsBefore == 0) return 0;
-        return _mulDivCeil(assets, totalSupply, totalAssetsBefore);
+        return _convertToSharesCeil(assets, totalAssetsBefore);
     }
 
     /// @notice Preview how many assets redeeming `shares` would return (floor).
@@ -604,9 +659,14 @@ contract MinimalVault is IERC4626 {
         return harvested;
     }
 
-    /// @notice Convenience wrapper: forward an emergency panic call to the strategy.
-    /// @dev Marked nonReentrant to avoid nested state-moving vault calls during strategy panic.
-    function panic() external nonReentrant {
+    /// @notice Emergency wrapper: forward a panic call to the strategy. Guardian only.
+    /// @dev `IStrategy.panic()` unwinds positions "accepting that some slippage or loss may
+    /// occur", and real strategies restrict it. An unrestricted wrapper would let anyone force
+    /// that loss on every holder at will, and would relay around a strategy that only trusts the
+    /// vault's address. Marked nonReentrant to avoid nested state-moving vault calls during the
+    /// unwind. `harvest()` stays permissionless: the interface lets it realise gains only, and
+    /// keeps the assets in custody.
+    function panic() external nonReentrant onlyGuardian {
         strategy.panic();
         emit Panic(msg.sender);
     }
@@ -621,6 +681,8 @@ contract MinimalVault is IERC4626 {
     /// all that is required is that no underlying is left stranded here. Stranded tokens
     /// would be invisible to `totalAssets()` and unreachable through `withdraw()`, which
     /// measures only its own balance delta.
+    // Slither: deliberate exact comparisons / guarded post-call writes; see SECURITY.md, "Slither triage".
+    // slither-disable-next-line incorrect-equality
     function _assertStrategyPulled(uint256 vaultBefore) internal {
         require(tokenBalanceOf(address(this)) == vaultBefore, "MinimalVault: strategy did not pull");
         // A conforming strategy consumes the whole allowance; clear any residue either way.
@@ -629,41 +691,75 @@ contract MinimalVault is IERC4626 {
         }
     }
 
-    /// @dev An EMPTY vault (no shares outstanding) bootstraps 1:1. A WIPED-OUT vault
-    /// (shares outstanding, no assets) is a different state entirely and must not be
-    /// priced 1:1: doing so mints new money at the same rate as the dead shares and hands
-    /// the newcomer's assets straight to them. There is no exchange rate to quote, so the
-    /// quote is 0 and `deposit()` / `mint()` refuse the call outright ("no-price").
+    /// @dev Shares for `amount` assets, FLOOR, priced with one virtual share and one virtual
+    /// asset: `amount * (totalSupply + 1) / (totalAssetsBefore + 1)`.
+    ///
+    /// Why the virtual pair: with plain proportional pricing the zero-share guard in `deposit()`
+    /// only stops the TOTAL loss of the first-depositor inflation attack, not the attack. An
+    /// attacker deposits 1 wei (1 share), donates D straight to the strategy, and a victim who
+    /// then deposits 2D + 1 is floored to a single share worth 1.5D: the attacker's share is now
+    /// worth 1.5D as well, a profit of 0.5D taken from the victim. With the virtual pair the vault
+    /// itself holds one share of the pot, so the shares an inflated price mints go partly to that
+    /// unredeemable share rather than to the attacker: in the same scenario the victim gets 3
+    /// shares, the attacker's share is worth 0.6D and the attacker LOSES 0.4D. The attack is
+    /// never profitable; the residual griefing (an attacker can still make a victim lose, at a
+    /// cost at least as large to themselves) is documented in SECURITY.md. This is the ERC-4626
+    /// "decimals offset" scheme with an offset of 0, so an EMPTY vault still bootstraps 1:1.
+    ///
+    /// A WIPED-OUT vault (shares outstanding, no assets) is a different state entirely and must
+    /// not be priced: doing so mints new money alongside dead shares and hands part of the
+    /// newcomer's assets to them. There is no exchange rate to quote, so the quote is 0 and
+    /// `deposit()` / `mint()` refuse the call outright ("no-price").
+    // Slither: deliberate exact comparisons / guarded post-call writes; see SECURITY.md, "Slither triage".
+    // slither-disable-next-line incorrect-equality
     function _convertToShares(uint256 amount, uint256 totalAssetsBefore) internal view returns (uint256) {
-        if (totalSupply == 0) {
+        uint256 supply = totalSupply;
+        if (supply == 0) {
             // Bootstrap: 1:1 initial share for asset to keep it simple and deterministic.
             return amount;
         }
         if (totalAssetsBefore == 0) {
-            // Shares outstanding, nothing behind them: no price, and no division by zero.
+            // Shares outstanding, nothing behind them: no price.
             return 0;
         }
-        return _mulDivFloor(amount, totalSupply, totalAssetsBefore); // floor => conservative
+        return _mulDivFloor(amount, supply + 1, totalAssetsBefore + 1); // floor => conservative
     }
 
-    /// @dev With shares outstanding and no assets this returns 0 - shares backed by
-    /// nothing are worth nothing, and the view says so instead of quoting 1:1.
+    /// @dev Shares for `assets`, CEIL - the shares `withdraw()` burns for a payout, and what
+    /// `previewWithdraw` quotes. Callers guarantee `totalSupply > 0`.
+    function _convertToSharesCeil(uint256 assets, uint256 totalAssetsBefore) internal view returns (uint256) {
+        return _mulDivCeil(assets, totalSupply + 1, totalAssetsBefore + 1);
+    }
+
+    /// @dev Assets for `shares`, FLOOR: `shares * (totalAssetsBefore + 1) / (totalSupply + 1)`.
+    /// With shares outstanding and no assets this returns 0 - shares backed by nothing are
+    /// worth nothing, and the view says so instead of quoting 1:1.
+    // Slither: deliberate exact comparisons / guarded post-call writes; see SECURITY.md, "Slither triage".
+    // slither-disable-next-line incorrect-equality
     function _convertToAssets(uint256 shares, uint256 totalAssetsBefore) internal view returns (uint256) {
-        if (totalSupply == 0) {
+        uint256 supply = totalSupply;
+        if (supply == 0) {
             return shares;
         }
-        return _mulDivFloor(shares, totalAssetsBefore, totalSupply); // floor
+        if (totalAssetsBefore == 0) {
+            return 0;
+        }
+        return _mulDivFloor(shares, totalAssetsBefore + 1, supply + 1); // floor
     }
 
+    /// @dev Assets a mint of `shares` must collect, CEIL, so the minted shares are fully backed.
+    // Slither: deliberate exact comparisons / guarded post-call writes; see SECURITY.md, "Slither triage".
+    // slither-disable-next-line incorrect-equality
     function _convertToAssetsForMint(uint256 shares, uint256 totalAssetsBefore) internal view returns (uint256) {
-        // When minting, require the caller to send enough assets to cover shares.
-        if (totalSupply == 0) {
+        uint256 supply = totalSupply;
+        if (supply == 0) {
             return shares;
         }
-        // Ceil so we collect enough assets to back the minted shares.
-        return _mulDivCeil(shares, totalAssetsBefore, totalSupply);
+        return _mulDivCeil(shares, totalAssetsBefore + 1, supply + 1);
     }
 
+    // Slither: deliberate exact comparisons / guarded post-call writes; see SECURITY.md, "Slither triage".
+    // slither-disable-next-line incorrect-equality,incorrect-exp,divide-before-multiply
     function _mulDivFloor(uint256 x, uint256 y, uint256 denominator) internal pure returns (uint256 result) {
         unchecked {
             uint256 prod0;
@@ -708,6 +804,8 @@ contract MinimalVault is IERC4626 {
         }
     }
 
+    // Slither: deliberate exact comparisons / guarded post-call writes; see SECURITY.md, "Slither triage".
+    // slither-disable-next-line incorrect-equality
     function _mulDivCeil(uint256 x, uint256 y, uint256 denominator) internal pure returns (uint256) {
         uint256 floor = _mulDivFloor(x, y, denominator);
         if (mulmod(x, y, denominator) == 0) return floor;

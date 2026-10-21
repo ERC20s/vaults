@@ -15,7 +15,7 @@ contract RedeemOverflowTest {
     function setUp() public {
         token = new MockERC20();
         mock = new MockStrategy(token);
-        vault = new MinimalVault(IERC20(address(token)), IStrategy(address(mock)));
+        vault = new MinimalVault(IERC20(address(token)), IStrategy(address(mock)), address(this));
 
         // Strategy boundary: the vault must be wired to exactly this strategy and this underlying,
         // otherwise the custody checks below would be measuring the wrong contracts.
@@ -23,9 +23,9 @@ contract RedeemOverflowTest {
         require(vault.asset() == address(token), "vault not bound to the mock token");
     }
 
-    /// @notice Redeem with `shares * totalAssets` larger than 2^256 - 1. A naive
-    /// `shares * totalAssets / totalSupply` would panic on overflow; `_mulDivFloor` must return the
-    /// exact floored quotient, and the strategy must pay out exactly that amount.
+    /// @notice Redeem with `shares * (totalAssets + 1)` larger than 2^256 - 1. A naive
+    /// `shares * (totalAssets + 1) / (totalSupply + 1)` would panic on overflow; `_mulDivFloor`
+    /// must return the exact floored quotient, and the strategy must pay out exactly that amount.
     function test_RedeemHandlesExtremeInputs() public {
         // Bootstrap 3 shares 1:1 against 3 assets.
         token.mint(address(this), 3);
@@ -39,10 +39,10 @@ contract RedeemOverflowTest {
 
         // The product the naive formula would form really does overflow.
         uint256 shares = 2;
-        require(big > type(uint256).max / shares, "inputs do not overflow naive multiplication");
+        require(big + 1 > type(uint256).max / shares, "inputs do not overflow naive multiplication");
 
-        // floor(2 * big / 3), computed without overflow.
-        uint256 expected = (big / 3) * shares + ((big % 3) * shares) / 3;
+        // floor(2 * (big + 1) / (3 + 1)) - the virtual-pair price - computed without overflow.
+        uint256 expected = ((big + 1) / 4) * shares + (((big + 1) % 4) * shares) / 4;
 
         uint256 callerBefore = token.balanceOf(address(this));
         uint256 withdrawn = vault.redeem(shares);

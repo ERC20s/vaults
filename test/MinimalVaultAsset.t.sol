@@ -14,7 +14,7 @@ contract MinimalVaultAssetTest {
     function setUp() public {
         token = new MockERC20();
         mock = new MockStrategy(token);
-        vault = new MinimalVault(IERC20(address(token)), mock);
+        vault = new MinimalVault(IERC20(address(token)), mock, address(this));
     }
 
     function test_AssetReturnsTokenAddressAndMetadataPresent() public {

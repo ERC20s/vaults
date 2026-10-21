@@ -16,7 +16,7 @@ built against. All amounts are denominated in the underlying token, never in vau
 - `harvest() returns (harvested)` - realises gains; the assets stay in the strategy.
 - `panic()` - emergency unwind; the recovered assets stay in the strategy and leave via `withdraw()`.
 
-- MinimalVault exposes convenience wrappers `harvest()` and `panic()` that forward to the configured strategy. These wrappers are single-entry (nonReentrant) convenience entry points so callers that only know the vault address can trigger a harvest or emergency unwind without calling the strategy contract directly. See `src/vault/MinimalVault.sol` for the exact signatures and reentrancy behaviour.
+- MinimalVault exposes wrappers `harvest()` and `panic()` that forward to the configured strategy. Both are single-entry (nonReentrant). `harvest()` is permissionless, so callers that only know the vault address can realise gains; `panic()` is restricted to the vault's immutable `guardian` (the third constructor argument), because the strategy's emergency unwind may realise slippage or loss and a vault that relayed it for anyone would let anyone force that on every holder. See `src/vault/MinimalVault.sol` for the exact signatures and `SECURITY.md` for the trust model.
 
 ### Custody rule
 
@@ -46,7 +46,10 @@ forge test -vvv
 ```
 
 The same command is the `test` entry of the root `.d8a` `run:` block, so it is what the ▶ button
-in the VS Code extension and the group's server launch.
+in the VS Code extension and the group's server launch. CI (`.github/workflows/ci.yml`) runs the
+same two commands and a static-analysis job, `slither . --fail-medium`, which fails on any
+medium-or-higher finding that is not triaged inline and explained in `SECURITY.md`
+(`pip install slither-analyzer==0.11.6`; settings in `slither.config.json`).
 
 ### What the tests enforce
 
@@ -92,10 +95,22 @@ fixture that reverts on exactly that change and returns no boolean from `approve
 including the guards that keep the conservative (floor) share rounding safe. A deposit whose
 share amount rounds down to zero reverts instead of taking the assets and minting nothing - the
 donation case in the tests inflates `MockStrategy.totalAssets()` with a direct transfer and then
-proves the next deposit reverts rather than paying for zero shares. And after
+proves the next deposit reverts rather than paying for zero shares. The pull itself must raise the
+vault's balance by exactly `amount` (a fee-on-transfer asset is refused outright), and after
 `strategy.deposit(amount)` the vault requires its own token balance to be back where it started, so
 underlying can never be stranded in the vault where `totalAssets()` cannot see it and `withdraw()`
 cannot reach it; any allowance the strategy left unused is reset to zero.
+
+Shares are priced with one VIRTUAL share and one virtual asset - the ERC-4626 "decimals offset"
+scheme with an offset of 0: a deposit mints `floor(assets * (totalSupply + 1) / (totalAssets + 1))`
+and a redemption pays `floor(shares * (totalAssets + 1) / (totalSupply + 1))`, with the ceilings of
+the same ratios on mint and withdraw. An empty vault still bootstraps 1:1. The pair exists because
+the zero-share guard alone only stops the TOTAL loss of the first-depositor inflation attack: with
+plain proportional pricing an attacker who bootstraps with 1 wei and donates D to the strategy
+still profits 0.5 D from a victim who deposits 2 D + 1 (floored to one share worth 1.5 D). With the
+vault itself holding one share of the pot, the same attack loses the attacker 0.4 D.
+`test/MinimalVaultInflation.t.sol` runs that attack with exact numbers and fuzzes it, and
+`SECURITY.md` records the residual griefing bound.
 
 One state has no exchange rate at all, and the vault now says so. An EMPTY vault
 (`totalSupply == 0`) bootstraps 1:1, but a WIPED-OUT vault - shares outstanding while
@@ -110,12 +125,16 @@ with "no-liquidity". Locking beats silently paying new money to dead shares; a p
 would need an explicit recovery path, which is out of scope for this example.
 
 The same rounding discipline governs the exit. `redeem()` prices the assets it asks the strategy for
-with FLOOR (`shares * totalAssets / totalSupply`), so a redeemer is never paid more than the burned
-shares are worth: served in full it burns exactly `shares`, and on a strategy shortfall it burns only
-`ceil(withdrawn * totalSupply / totalAssets)` - the shares the payout actually covers. Every rounding
-step therefore favours the holders who stay, and the tests assert it directly as
-`totalAssetsAfter * totalSupplyBefore >= totalAssetsBefore * totalSupplyAfter` (assets per share
-never fall) in a donation case, a shortfall case and a fuzz run over deposit, yield and redeem sizes.
+with FLOOR (`shares * (totalAssets + 1) / (totalSupply + 1)`), so a redeemer is never paid more than
+the burned shares are worth: served in full it burns exactly `shares`, and on a strategy shortfall it
+burns only `ceil(withdrawn * (totalSupply + 1) / (totalAssets + 1))` - the shares the payout actually
+covers. Every rounding step therefore favours the holders who stay, and the tests assert it directly
+as `(assetsAfter + 1) * (supplyBefore + 1) >= (assetsBefore + 1) * (supplyAfter + 1)` (assets per
+share, virtual pair included, never fall) in a donation case, a shortfall case and a fuzz run over
+deposit, yield and redeem sizes. `test/MinimalVaultRounding.t.sol` states the ERC-4626 rounding
+rules as properties - every preview is the exact floor or ceil, every action settles at its preview,
+no round trip profits the caller - and proves `maxWithdraw(owner)` / `maxRedeem(owner)` are exactly
+what `withdraw()` / `redeem()` serve in full while the strategy locks part of the position.
 
 Every guard above protects a single call, and none of them survives a nested one - so the four
 state-changing entry points (`deposit`, `mint`, `withdraw`, `redeem`) are now single-entry
@@ -138,12 +157,19 @@ All of those vault tests are single shots. `test/MinimalVaultInvariants.t.sol` i
 Foundry drives random SEQUENCES of deposits, mints, withdrawals, redemptions, harvests, lockups and
 injected yield through `test/handlers/VaultHandler.sol`, and after every sequence it asserts
 
-- assets per share never fall, compared cross-multiplied
-  (`assetsAfter * supplyBefore >= assetsBefore * supplyAfter`) against the pair recorded when the
-  last action started, so there is no division and no dust tolerance;
+- assets per share never fall, compared cross-multiplied with the virtual pair the vault prices
+  with (`(assetsAfter + 1) * (supplyBefore + 1) >= (assetsBefore + 1) * (supplyAfter + 1)`)
+  against the pair recorded when the last action started, so there is no division and no dust
+  tolerance;
 - the modelled holders' balances still add up to `totalSupply`;
+- no free shares: `totalSupply` is exactly the shares minted by priced deposits and mints minus the
+  shares burned by withdrawals and redemptions, so no transfer, harvest, panic or callback created one;
+- totalAssets accounting: the strategy holds exactly deposits plus injected yield minus payouts;
 - the vault holds no underlying between calls, which is `_assertStrategyPulled` seen from outside;
 - assets paid out never exceed assets deposited plus the yield that really arrived;
+- the holders' quoted claims, summed, fit inside what the strategy holds;
+- `maxWithdraw(owner)` / `maxRedeem(owner)` never exceed the owner's claim, balance or the
+  strategy's liquidity, and `maxRedeem` never quotes a zero-asset redeem;
 - the pricing views never revert, in any state a sequence can reach;
 - every per-call post-condition the handler checked held on every call - a successful deposit never
   priced a wiped-out vault, a redemption never took more than the shares offered were worth, a
@@ -152,7 +178,9 @@ injected yield through `test/handlers/VaultHandler.sol`, and after every sequenc
 
 Because `MinimalVault` credits `msg.sender` and this suite uses no cheatcodes, the handler owns three
 `VaultActor` contracts (declared in the same file) that hold the shares; each refuses any caller but
-the handler. The handler records post-condition failures in a counter instead of reverting, exactly
+the handler. The handler is also the vault's guardian, so the random sequences include `panic()`
+(must move no token and reopen the position) and share `transfer()`s between actors (a pure ledger
+move). The handler records post-condition failures in a counter instead of reverting, exactly
 as `StrategyHandler` does, and a revert from the vault is generally NOT a failure - refusing a
 zero-share deposit or a "no-price" deposit is the merged behaviour under test. The reentrancy guard
 is asserted indirectly, since `_locked` is private: a vault left latched would stop moving the ledger
@@ -165,6 +193,20 @@ settable fraction, `pullBps`, so the vault's custody assertion is exercised),
 `MockReentrantStrategy.sol` (a conforming `IStrategy` that, once armed, calls back into the
 `ReentrantDepositor` helper in the same file before returning from `deposit()` or `withdraw()`) and
 `MockStrategy.sol` (a reference `IStrategy` with a settable illiquid portion, and a `principal`
-baseline so `harvest()` reports realised gain while keeping custody). All are test fixtures only -
-unrestricted minting, no access control, no real yield source - and must never be deployed or
-treated as an audited strategy.
+baseline so `harvest()` reports realised gain while keeping custody), `MockGenericStrategy.sol`
+(the same over the plain `IERC20` interface, so a vault can be built over the fixtures below),
+`MockERC2612.sol` (a REAL EIP-2612 permit token: domain, nonces, deadline, `ecrecover`),
+`MockFeeOnTransferERC20.sol` (burns a settable fee on every transfer) and `MockRebasingERC20.sol`
+(balances scale with a settable index). All are test fixtures only - unrestricted minting, no
+access control, no real yield source - and must never be deployed or treated as an audited
+strategy.
+
+The security review of the vault (findings table in `SECURITY.md`) added four more single-shot
+suites: `test/MinimalVaultInflation.t.sol` (the first-depositor attack, exact and fuzzed),
+`test/MinimalVaultRounding.t.sol` (ERC-4626 rounding and limit honesty),
+`test/MinimalVaultPanicAccess.t.sol` (guardian-only `panic()`, permissionless `harvest()`),
+`test/MinimalVaultAssetPermit.t.sol` (permit deposits against real signatures: used once, refused
+when replayed, expired or forged, and still accepted after a third party front-runs the permit)
+and `test/MinimalVaultUnsupportedAssets.t.sol` (fee-on-transfer and rebasing assets fail closed).
+`test/MinimalVaultSharesPermit.t.sol` additionally proves a share permit signed before a chain fork
+is refused after it.

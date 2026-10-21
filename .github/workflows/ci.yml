@@ -21,3 +21,26 @@ jobs:
       # The `test` entry of the `run:` block in .d8a.
       - name: forge test -vvv
         run: forge test -vvv
+
+  slither:
+    name: slither
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: foundry-rs/foundry-toolchain@v1
+        with:
+          version: stable
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Install slither
+        run: pip install slither-analyzer==0.11.6
+
+      # Settings live in slither.config.json (src only, optimisation findings excluded). Every
+      # medium-or-higher finding either fails this job or carries an inline justification that
+      # SECURITY.md ("Slither triage") explains.
+      - name: slither
+        run: slither . --fail-medium

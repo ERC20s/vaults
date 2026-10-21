@@ -72,10 +72,60 @@ contract MinimalVaultInvariantsTest {
         uint256 supplyBefore = handler.prevSupply();
         uint256 supplyAfter = vault.totalSupply();
         if (supplyBefore == 0 || supplyAfter == 0) return;
+        // The price the vault quotes includes one virtual share and one virtual asset.
         require(
-            strategy.totalAssets() * supplyBefore >= handler.prevAssets() * supplyAfter,
+            (strategy.totalAssets() + 1) * (supplyBefore + 1) >= (handler.prevAssets() + 1) * (supplyAfter + 1),
             "invariant: assets per share fell"
         );
+    }
+
+    /// No free shares. Every share in existence was created by a `deposit()` or `mint()` whose
+    /// price the handler checked on the spot, and destroyed only by a `withdraw()` or `redeem()`:
+    /// the supply is exactly minted minus burned, so nothing else - a transfer, a harvest, a panic,
+    /// a callback - can have created one.
+    function invariant_NoFreeShares() public view {
+        require(
+            vault.totalSupply() == handler.sharesMinted() - handler.sharesBurned(),
+            "invariant: shares exist that no priced deposit or mint created"
+        );
+    }
+
+    /// totalAssets accounting: what the strategy holds is exactly what was deposited, less what
+    /// was paid out, plus the yield that really arrived. `harvest()` and `panic()` report and
+    /// reopen, they never move a token; nothing accrues from nowhere.
+    function invariant_TotalAssetsAccounting() public view {
+        if (!_ledgerIsIsolated()) return;
+        require(
+            strategy.totalAssets() == handler.assetsIn() + handler.yieldInjected() - handler.assetsOut(),
+            "invariant: totalAssets drifted from deposits + yield - payouts"
+        );
+    }
+
+    /// Solvency per holder: the floor value of every holder's shares, summed, fits inside what
+    /// the strategy holds, so no holder's quoted claim is backed by another holder's deposit.
+    function invariant_HolderClaimsAreCovered() public view {
+        uint256 claims;
+        for (uint256 i = 0; i < handler.actorCount(); i++) {
+            claims += vault.convertToAssets(vault.balanceOf(address(handler.actors(i))));
+        }
+        require(claims <= strategy.totalAssets(), "invariant: quoted claims exceed the assets held");
+    }
+
+    /// The per-owner limits are honest in any reachable state: never above the owner's balance or
+    /// floor-priced claim, never above the strategy's liquidity, and `maxRedeem` never asks for a
+    /// zero-asset redemption the vault would refuse.
+    function invariant_OwnerLimitsAreHonest() public view {
+        uint256 liquidity = strategy.maxWithdraw();
+        for (uint256 i = 0; i < handler.actorCount(); i++) {
+            address owner = address(handler.actors(i));
+            uint256 maxShares = vault.maxRedeem(owner);
+            uint256 maxAssets = vault.maxWithdraw(owner);
+            require(maxShares <= vault.balanceOf(owner), "invariant: maxRedeem above balance");
+            require(maxAssets <= vault.convertToAssets(vault.balanceOf(owner)), "invariant: maxWithdraw above claim");
+            require(maxAssets <= liquidity, "invariant: maxWithdraw above strategy liquidity");
+            require(vault.previewRedeem(maxShares) <= liquidity, "invariant: maxRedeem not serviceable");
+            require(maxShares == 0 || vault.previewRedeem(maxShares) > 0, "invariant: maxRedeem quotes a zero-asset redeem");
+        }
     }
 
     /// Every share belongs to somebody. `totalSupply` is maintained by hand in `deposit`, `mint`,
@@ -174,26 +224,32 @@ contract MinimalVaultInvariantsTest {
         require(vault.totalSupply() == 1_500e18, "supply must follow the priced deposit");
         require(strategy.totalAssets() == 3_000e18, "the strategy must hold both deposits and the yield");
 
-        // Full redemption at the floor price: it takes back exactly what it paid, no more.
+        // Full redemption at the floor price: it takes back what it paid, less the one wei the
+        // virtual share keeps - floor(500e18 * (3,000e18 + 1) / (1,500e18 + 1)) == 1,000e18 - 1.
+        uint256 redeemed = (uint256(500e18) * (uint256(3_000e18) + 1)) / (uint256(1_500e18) + 1);
+        require(redeemed == 1_000e18 - 1, "setup: redeem arithmetic");
         handler.redeem(1, 500e18);
         require(vault.balanceOf(address(second)) == 0, "the redeemer must hold no shares afterwards");
-        require(token.balanceOf(address(second)) == 1_000e18, "the redeemer must be paid what its shares were worth");
+        require(token.balanceOf(address(second)) == redeemed, "the redeemer must be paid what its shares were worth");
         require(vault.totalSupply() == 1_000e18, "the burn must reach totalSupply");
-        require(strategy.totalAssets() == 2_000e18, "the remaining holder keeps the doubled price");
+        require(strategy.totalAssets() == 2_000e18 + 1, "the remaining holder keeps the doubled price");
 
         // Lock most of the position: the withdrawal is capped and burns only what it was paid for.
         handler.setIlliquid(1_500e18);
-        require(strategy.maxWithdraw() == 500e18, "the lockup must cap the redeemable amount");
+        require(strategy.maxWithdraw() == 500e18 + 1, "the lockup must cap the redeemable amount");
 
+        // The strategy serves 500e18 + 1; the burn is ceil((500e18 + 1) * (1,000e18 + 1) / (2,000e18 + 2))
+        // == 250e18 + 1 shares, so 750e18 - 1 remain.
         handler.withdraw(0, 1_000e18);
-        require(token.balanceOf(address(first)) == 500e18, "a capped withdrawal pays what the strategy could serve");
-        require(vault.balanceOf(address(first)) == 750e18, "a capped withdrawal burns only the shares it paid for");
-        require(vault.totalSupply() == 750e18, "supply must follow the capped burn");
+        require(token.balanceOf(address(first)) == 500e18 + 1, "a capped withdrawal pays what the strategy could serve");
+        require(vault.balanceOf(address(first)) == 750e18 - 1, "a capped withdrawal burns only the shares it paid for");
+        require(vault.totalSupply() == 750e18 - 1, "supply must follow the capped burn");
         require(strategy.totalAssets() == 1_500e18, "custody must fall by exactly what was pushed");
 
-        // The price never fell across the whole sequence: 2,000/1,000 then 1,500/750, both 2.0.
+        // The price never fell across the whole sequence (virtual pair, cross-multiplied):
+        // (1,500e18 + 1) / (750e18 - 1 + 1) >= (2,000e18 + 1 + 1) / (1,000e18 + 1).
         require(
-            strategy.totalAssets() * 1_000e18 >= 2_000e18 * vault.totalSupply(),
+            (strategy.totalAssets() + 1) * (1_000e18 + 1) >= (2_000e18 + 2) * (vault.totalSupply() + 1),
             "assets per share fell across the sequence"
         );
 
